@@ -153,6 +153,11 @@ class Publicador:
 
     def _atender(self, conexion: socket.socket, ranura: RanuraCliente) -> None:
         """Un hilo por cliente: lo único que puede bloquearse es él mismo."""
+        hilo_lector = threading.Thread(
+            target=self._leer_cliente, args=(conexion, ranura.direccion), name="lector", daemon=True
+        )
+        hilo_lector.start()
+
         try:
             while not self._parar.is_set():
                 linea = ranura.tomar()
@@ -176,6 +181,22 @@ class Publicador:
                     ranura.direccion[0], ranura.direccion[1], ranura.enviados, ranura.pisados
                 )
             )
+
+    def _leer_cliente(self, conexion: socket.socket, direccion: tuple[str, int]) -> None:
+        buf = ""
+        while not self._parar.is_set():
+            try:
+                data = conexion.recv(512)
+                if not data:
+                    break
+                buf += data.decode("utf-8", errors="ignore")
+                while "\n" in buf:
+                    linea, buf = buf.split("\n", 1)
+                    linea = linea.strip()
+                    if linea:
+                        self._avisar(linea)
+            except (OSError, Exception):
+                break
 
     def emitir(self, linea: str) -> None:
         with self._lock:

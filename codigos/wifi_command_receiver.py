@@ -53,6 +53,9 @@ def stop():
     ib.pixel = (255, 0, 0)
 
 
+TRIM_L = 1.0
+TRIM_R = 1.0
+
 def motor(left, right):
     """
     Controla directamente ambos motores.
@@ -60,6 +63,11 @@ def motor(left, right):
     left  : -1.0 a 1.0
     right : -1.0 a 1.0
     """
+    global TRIM_L, TRIM_R
+
+    # Aplicar calibracion
+    left *= TRIM_L
+    right *= TRIM_R
 
     # Limitar los valores al rango permitido
     left = max(-1.0, min(1.0, left))
@@ -127,6 +135,25 @@ def process_command(command):
         motor(left, right)
 
         return True
+
+    # ------------------------------
+    # TRIM left right
+    # ------------------------------
+
+    if parts[0] == "TRIM":
+        if len(parts) != 3:
+            print("Error: TRIM necesita dos valores (left right)")
+            return False
+
+        try:
+            global TRIM_L, TRIM_R
+            TRIM_L = float(parts[1])
+            TRIM_R = float(parts[2])
+            print("Nuevos Trims:", TRIM_L, TRIM_R)
+            return True
+        except ValueError:
+            print("Error: valores de trim invalidos")
+            return False
 
     print("Comando desconocido")
 

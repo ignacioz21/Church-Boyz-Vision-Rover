@@ -38,6 +38,7 @@ STOP = "STOP"
 MOTOR = "MOTOR"
 TURN = "TURN"
 HEADING = "HEADING"
+TRIM = "TRIM"
 
 
 # --------------------------------------------------
@@ -165,6 +166,14 @@ def cmd_heading(
         + str(duration)
     )
 
+def cmd_trim(left, right):
+    """
+    Ajusta el multiplicador de calibracion de los motores.
+    Ejemplo: TRIM|0.95|1.0
+    """
+    left = limit(float(left), 0.0, 2.0)
+    right = limit(float(right), 0.0, 2.0)
+    return f"TRIM|{left}|{right}"
 
 # --------------------------------------------------
 # INTERPRETAR COMANDOS
@@ -418,6 +427,29 @@ def parse_command(message):
             "duration": duration
         }
 
+    # --------------------------------------------------
+    # TRIM
+    # --------------------------------------------------
+    if command == TRIM:
+        if len(parts) != 3:
+            return {
+                "valid": False,
+                "error": "TRIM requiere: TRIM|left|right"
+            }
+        try:
+            left = float(parts[1])
+            right = float(parts[2])
+        except ValueError:
+            return {
+                "valid": False,
+                "error": "Parametros TRIM invalidos"
+            }
+        return {
+            "valid": True,
+            "command": TRIM,
+            "left": left,
+            "right": right
+        }
 
     # --------------------------------------------------
     # DESCONOCIDO

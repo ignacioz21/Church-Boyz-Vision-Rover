@@ -154,6 +154,8 @@ def detectar_marcadores_crudo(
     """
     if imagen.ndim == 3:
         imagen = cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    imagen = clahe.apply(imagen)
     detector = cv2.aruco.ArucoDetector(
         diccionario_aruco(nombre_diccionario), parametros_detector(refinamiento)
     )

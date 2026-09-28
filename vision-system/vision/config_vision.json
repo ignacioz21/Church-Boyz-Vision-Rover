@@ -166,7 +166,7 @@
   },
   "ronda": {
     "_acerca_de": "Los tres tiempos de una ronda, en milisegundos (vision/sistema.py, clase Arbitro). La visión es árbitro de verdad: lleva el cronómetro oficial, pasa de READY a RUNNING sola y cierra la ronda sola. Los tiempos van declarados acá y no incrustados en el código porque son reglas de competencia, y porque probar el sistema sin esperar un minuto real exige poder bajarlos.",
-    "preparacion_ms": 60000,
+    "preparacion_ms": 5000,
     "_nota_preparacion": "Cuánto dura READY. Al llegar a cero la ronda pasa a RUNNING SOLA, y no hay tecla que lo adelante: si se pudiera adelantar, el tiempo de preparación igual para todos los equipos sería decorativo. Si al llegar a cero NO hay coordenadas, la ronda no arranca: espera a que vuelvan y arranca ahí, sin devolver el tiempo de preparación ya consumido. Nadie gana preparación tapando la cancha; solo demora el arranque para todos por igual.",
     "duracion_ms": 600000,
     "_nota_duracion": "Cuánto dura RUNNING. Al agotarse, la ronda se cierra con motivo `tiempo_agotado`. También puede cerrarse antes por `reto_cumplido` —cuando TODOS los cubos en juego quedan en posición, que pueden ser dos o tres—, por `geometria_perdida`, o porque una persona la cierre con `stop` (`detenida_por_operador`). El quinto motivo, `abortada_en_preparacion`, es el de `abort` durante READY.",
@@ -229,17 +229,17 @@
   },
   "deteccion_cubos": {
     "_acerca_de": "Detección de cubos por color (vision/detectors/cubos.py). El tablero es acromático —grises, blancos, negros— así que todo lo que tenga color saturado es, por definición, un objeto de interés. Ese es el filtro que separa el fondo del contenido casi gratis.",
-    "croma_minimo": 28.0,
+    "croma_minimo": 16.0,
     "_nota_croma": "Croma mínimo en Lab, `raiz(a*² + b*²)`, para que un píxel cuente como coloreado. El croma de Lab ES la saturación en sentido perceptual. Se usa Lab y no HSV para el umbral Y para la clasificación —un solo espacio— porque el matiz de HSV se vuelve inestable justo donde más importa: con poca luz o poca saturación da saltos entre extremos.",
     "matices_lab_grados": {
       "red": 39.9,
-      "green": 136.0,
+      "green": 155.0,
       "blue": 306.2,
       "yellow": 103.0
     },
     "_POR_QUE_POR_MATIZ": "Se clasifica por el MATIZ —el ángulo `atan2(b*, a*)`— y no por la distancia a un color de referencia. El matiz es casi invariante a la iluminación y a lo saturado que sea el plástico: un cubo rojo a la sombra sigue teniendo matiz de rojo, aunque su croma y su luminosidad bajen. Por eso NO hace falta medir los cubos reales antes de arrancar: los valores de acá son los de los primarios sRGB puros y alcanzan, porque los tres colores del reto están de 94 a 170 grados entre sí.",
     "_EL_AMARILLO_ES_EXCLUSION": "El amarillo está en la lista aunque esta edición no tenga obstáculos, y NO es un cubo: una mancha que caiga más cerca del amarillo se descarta. Existe porque verde y amarillo están a solo 33 grados —el par más ajustado con diferencia— y sin esa clase, cualquier objeto amarillo que ande por la cancha se leería como cubo verde.",
-    "matiz_tolerancia_grados": 45.0,
+    "matiz_tolerancia_grados": 50.0,
     "_nota_tolerancia": "Cuánto puede apartarse el matiz medido del de referencia para aceptar la clasificación. Con 45 grados, las clases no se solapan (la más cercana está a 33) y una mancha de un color que no es ninguno de los tres se descarta en vez de forzarse.",
     "area_minima_relativa": 0.25,
     "area_maxima_relativa": 3.0,
@@ -340,9 +340,9 @@
       "_acerca_de": "Exposición, enfoque y balance de blancos SIEMPRE fijos, nunca en automático (CLAUDE.md, sección 5). Un ajuste que se mueve solo cambia los colores a mitad de ronda y rompe la detección. El caso más peligroso es el robot negro: con exposición automática, la cámara sube la ganancia para 'compensar' el negro y quema los marcadores blancos.",
       "exposicion": {
         "fijar": true,
-        "valor": 120,
-        "prueba_a": 50,
-        "prueba_b": 500,
+        "valor": 300,
+        "prueba_a": 100,
+        "prueba_b": 800,
         "_nota_unidades": "OJO: las unidades dependen del backend. En DSHOW el valor suele ser log2 de segundos (-6 = 1/64 s); en V4L2 son unidades de 100 microsegundos. No hay un valor universal: hay que ajustarlo mirando la imagen en la cámara y el sistema reales.",
         "_nota_prueba": "prueba_a y prueba_b son dos valores MUY distintos que se usan para verificar por efecto: si el brillo medio de la imagen no cambia entre los dos, la cámara ignoró el ajuste aunque diga que lo aceptó."
       },
