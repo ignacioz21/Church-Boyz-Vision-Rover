@@ -15,7 +15,7 @@
 #define WIFI_SSID               "flia_martinez"
 #define WIFI_PASSWORD           "CarterHugo2508*"
 
-#define VISION_HOST             "192.168.88.13" // IP local de tu PC (wlp11s0)
+#define VISION_HOST             "172.20.10.7" // IP local de tu PC
 #define VISION_PORT             2026            // Puerto oficial del reto (CONTRATO.md)
 
 #define TELEMETRY_TIMEOUT_MS    500             // Watchdog de pérdida de visión (failsafe)

@@ -208,7 +208,7 @@ class CamaraDetectada:
 
 #: Palabras que delatan una cámara integrada. Sirven para sugerir la correcta:
 #: en este proyecto la que interesa es siempre la USB que mira el tablero.
-_PISTAS_INTEGRADA = ("macbook", "facetime", "integrated", "built-in", "internal", "isight")
+_PISTAS_INTEGRADA = ("macbook", "facetime", "integrated", "built-in", "internal", "isight", "truevision")
 
 
 def nombres_del_sistema() -> list[tuple[str, str]]:
@@ -247,10 +247,24 @@ def nombres_del_sistema() -> list[tuple[str, str]]:
 
         if sys.platform.startswith("linux"):
             import glob
+            import os
             nombres = []
-            for ruta in sorted(glob.glob("/sys/class/video4linux/video*/name")):
+            for ruta in sorted(glob.glob("/sys/class/video4linux/video*/name"),
+                               key=lambda r: int(r.split("/")[4].replace("video", "") or 0)):
+                dir_v = os.path.dirname(ruta)
+                # En Linux, muchos dispositivos V4L2 exponen un nodo secundario para metadata (index != 0).
+                # Solo los nodos con index == 0 corresponden a captura de video en OpenCV.
+                idx_path = os.path.join(dir_v, "index")
+                if os.path.exists(idx_path):
+                    try:
+                        with open(idx_path, encoding="utf-8") as fi:
+                            if fi.read().strip() != "0":
+                                continue
+                    except OSError:
+                        pass
+                v_num = dir_v.split("/")[-1]
                 with open(ruta, encoding="utf-8", errors="replace") as f:
-                    nombres.append((f.read().strip(), ruta.split("/")[4]))
+                    nombres.append((f.read().strip(), v_num))
             return nombres
     except Exception:  # noqa: BLE001 — sin nombres se sigue igual, con menos ayuda
         return []
@@ -270,6 +284,12 @@ def camaras_del_sistema() -> list[CamaraDetectada]:
     """
     camaras = []
     for indice, (nombre, detalle) in enumerate(nombres_del_sistema()):
+        # En Linux, el índice para cv2.VideoCapture corresponde al número en /dev/videoN
+        if detalle.startswith("video"):
+            try:
+                indice = int(detalle.replace("video", ""))
+            except ValueError:
+                pass
         texto = "{} {}".format(nombre, detalle).lower()
         camaras.append(
             CamaraDetectada(
@@ -334,18 +354,13 @@ def menu_camara(camaras: list[CamaraDetectada], por_defecto: int = 0) -> int | N
     indices = sorted({c.indice for c in camaras})
     print()
     if camaras:
-        print("  CÁMARAS CONECTADAS  (nombres según el sistema; el orden NO es el índice)")
+        print("  CÁMARAS CONECTADAS")
         print("  " + "-" * 70)
         for camara in camaras:
             tipo = "integrada" if camara.integrada else "USB / externa"
             detalle = "  ·  {}".format(camara.detalle) if camara.detalle else ""
-            print("    ·  {:<24}  {:<14}{}".format(camara.nombre[:24], tipo, detalle))
+            print("    [{}]  {:<24}  {:<14}{}".format(camara.indice, camara.nombre[:24], tipo, detalle))
         print("  " + "-" * 70)
-    print()
-    print("  ⚠  El nombre es ORIENTATIVO. El orden del sistema no siempre coincide")
-    print("     con el índice; en algunos equipos están invertidos. La forma segura")
-    print("     de saberlo es mirar la imagen: si no es la que querías, salí con q")
-    print("     y volvé a correr eligiendo el otro índice.")
     print()
     print("  Índices disponibles: {}".format(", ".join(str(i) for i in indices)))
 
@@ -422,7 +437,11 @@ def elegir_camara(cfg: Camara, indice_pedido: int | str | None = None) -> tuple[
     if modo == "menu" and interactivo:
         conocidas = camaras_del_sistema()
         if len(conocidas) > 1:
-            elegido = menu_camara(conocidas, por_defecto=0)
+            por_defecto = conocidas[0].indice
+            usb = [c.indice for c in conocidas if not c.integrada]
+            if usb:
+                por_defecto = usb[0]
+            elegido = menu_camara(conocidas, por_defecto=por_defecto)
             if elegido is None:
                 raise ErrorCamara("elección de cámara cancelada.")
             print("  Usando el índice {}. Para no elegir cada vez, poné "

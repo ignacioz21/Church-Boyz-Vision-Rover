@@ -1,9 +1,17 @@
 import socket
+import sys
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
+# En puntos de acceso (como iPhone Hotspot), el broadcast de subred (172.20.10.15)
+# es más confiable que 255.255.255.255. También se puede pasar la IP del ESP32 por argumento.
+destinos = ["255.255.255.255", "172.20.10.15"]
+if len(sys.argv) > 1:
+    destinos.insert(0, sys.argv[1])
+
 print("=== CONTROL REMOTO INALÁMBRICO DEL ROVER ===")
+print(f"Destinos UDP (puerto 8889): {destinos}")
 print("Comandos disponibles:")
 print("  p : Iniciar Patrullaje de bordes (Navegacion Telemetria)")
 print("  3 : Cazar cubo ROJO y llevar al depósito")
@@ -18,8 +26,12 @@ while True:
     try:
         cmd = input("Comando > ")
         if cmd.strip():
-            # Envía el comando como broadcast a toda la red Wi-Fi
-            sock.sendto(cmd.strip()[0].encode(), ("255.255.255.255", 8889))
+            c = cmd.strip()[0].encode()
+            for d in destinos:
+                try:
+                    sock.sendto(c, (d, 8889))
+                except Exception:
+                    pass
     except KeyboardInterrupt:
         print("\nSaliendo...")
         break

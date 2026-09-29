@@ -12,10 +12,10 @@
 // =============================================================================
 // 2. COMUNICACIÓN WI-FI Y SERVIDOR DE VISIÓN CENITAL
 // =============================================================================
-#define WIFI_SSID               "flia_martinez"
-#define WIFI_PASSWORD           "CarterHugo2508*"
+#define WIFI_SSID               "iPhone 13 Andres"
+#define WIFI_PASSWORD           "12345678910"
 
-#define VISION_HOST             "192.168.88.13" // IP de la PC con la cámara
+#define VISION_HOST             "172.20.10.7" // IP de la PC con la cámara
 #define VISION_PORT             2026            // Puerto TCP oficial (CONTRATO.md)
 
 #define TELEMETRY_TIMEOUT_MS    500             // Límite de latencia antes de activar failsafe

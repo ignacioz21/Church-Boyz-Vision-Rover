@@ -340,9 +340,9 @@
       "_acerca_de": "Exposición, enfoque y balance de blancos SIEMPRE fijos, nunca en automático (CLAUDE.md, sección 5). Un ajuste que se mueve solo cambia los colores a mitad de ronda y rompe la detección. El caso más peligroso es el robot negro: con exposición automática, la cámara sube la ganancia para 'compensar' el negro y quema los marcadores blancos.",
       "exposicion": {
         "fijar": true,
-        "valor": 300,
-        "prueba_a": 100,
-        "prueba_b": 800,
+        "valor": 50,
+        "prueba_a": 25,
+        "prueba_b": 100,
         "_nota_unidades": "OJO: las unidades dependen del backend. En DSHOW el valor suele ser log2 de segundos (-6 = 1/64 s); en V4L2 son unidades de 100 microsegundos. No hay un valor universal: hay que ajustarlo mirando la imagen en la cámara y el sistema reales.",
         "_nota_prueba": "prueba_a y prueba_b son dos valores MUY distintos que se usan para verificar por efecto: si el brillo medio de la imagen no cambia entre los dos, la cámara ignoró el ajuste aunque diga que lo aceptó."
       },
