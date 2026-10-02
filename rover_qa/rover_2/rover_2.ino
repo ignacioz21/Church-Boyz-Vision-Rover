@@ -38,6 +38,9 @@ static void printMenu() {
     Serial.println("  [i] Invertir polaridad Motor Derecho (INVERT_R)");
     Serial.println("  [l] Invertir polaridad Motor Izquierdo (INVERT_L)");
     Serial.println("  [c] Alternar ID del Rover (10 <-> 11)");
+    Serial.println("  [[] Bajar trim motor IZQUIERDO (-5%)");
+    Serial.println("  []] Bajar trim motor DERECHO (-5%)");
+    Serial.println("  [{] o [}] Restaurar trims al 100%");
     Serial.println("  [6] Mision MULTI-CUBO AUTONOMA (Busca 2 cubos por cercania)");
     Serial.println("  [7] Mision RETO GLOBAL (Coordinacion descentralizada)");
     Serial.println("  [r] Detener motores");
@@ -82,7 +85,20 @@ void loop() {
         Serial.setTimeout(10);
         str_cmd = Serial.readStringUntil('\n');
         str_cmd.trim();
-        if (str_cmd.length() == 1) {
+        
+        // Soporte para comandos dirigidos a un ID especifico (ej. "10:6")
+        if (str_cmd.indexOf(":") != -1 && str_cmd.charAt(0) != 'D') {
+            int sep = str_cmd.indexOf(":");
+            int target_id = str_cmd.substring(0, sep).toInt();
+            if (target_id != telemetryGetRoverId()) {
+                cmd = '\0'; // Ignorar paquete, es para el otro rover
+                str_cmd = "";
+            } else {
+                str_cmd = str_cmd.substring(sep + 1);
+            }
+        }
+        
+        if (str_cmd.length() >= 1) {
             cmd = str_cmd.charAt(0);
         }
     } else if (udp_cmd_started && udpCmd.parsePacket()) {
@@ -91,7 +107,20 @@ void loop() {
         if (len > 0) packetBuffer[len] = 0;
         str_cmd = String(packetBuffer);
         str_cmd.trim();
-        if (str_cmd.length() == 1) {
+        
+        // Soporte para comandos dirigidos a un ID especifico (ej. "10:6")
+        if (str_cmd.indexOf(":") != -1 && str_cmd.charAt(0) != 'D') {
+            int sep = str_cmd.indexOf(":");
+            int target_id = str_cmd.substring(0, sep).toInt();
+            if (target_id != telemetryGetRoverId()) {
+                cmd = '\0'; // Ignorar paquete, es para el otro rover
+                str_cmd = "";
+            } else {
+                str_cmd = str_cmd.substring(sep + 1);
+            }
+        }
+        
+        if (str_cmd.length() >= 1) {
             cmd = str_cmd.charAt(0);
         }
         udpCmd.flush(); // Limpiar el resto del paquete
@@ -144,12 +173,31 @@ void loop() {
             setMotorInversions(new_l, getMotorInvertR());
             Serial.printf("\n>>> [POLARIDAD] Motor IZQUIERDO Invert_L = %s (InvR=%s)\n",
                           new_l ? "TRUE" : "FALSE", getMotorInvertR() ? "TRUE" : "FALSE");
+        } else if (cmd == 'D') {
+            float new_dist = str_cmd.substring(2).toFloat();
+            if (new_dist >= 2.0f && new_dist <= 20.0f) {
+                setPreApproachDistance(new_dist);
+                Serial.printf("\n>>> [DISTANCIA] Rotacion pre-approach ajustada a %.1f bloques\n", new_dist);
+            }
         } else if (cmd == 'c' || cmd == 'C') {
             int current = telemetryGetRoverId();
             int new_id = (current == 10) ? 11 : 10;
             int peer_id = (new_id == 10) ? 11 : 10;
             telemetrySetRoverId(new_id, peer_id);
             Serial.printf("\n>>> [ROVER ID] Cambiado a: %d (Companero: %d)\n\n", new_id, peer_id);
+        } else if (cmd == '[') {
+            float tl = getMotorTrimL() - 0.05f;
+            if (tl < 0.3f) tl = 1.0f;
+            setMotorTrim(tl, getMotorTrimR());
+            Serial.printf("\n>>> [TRIM] Motor IZQUIERDO bajado a %.2f (%.0f%%)\n", tl, tl*100);
+        } else if (cmd == ']') {
+            float tr = getMotorTrimR() - 0.05f;
+            if (tr < 0.3f) tr = 1.0f;
+            setMotorTrim(getMotorTrimL(), tr);
+            Serial.printf("\n>>> [TRIM] Motor DERECHO bajado a %.2f (%.0f%%)\n", tr, tr*100);
+        } else if (cmd == '{' || cmd == '}') {
+            setMotorTrim(1.0f, 1.0f);
+            Serial.println("\n>>> [TRIM] Ambos motores restaurados al 100%\n");
         } else if (cmd == 'r' || cmd == 'R') {
             stopMotors();
             motor_diag_until_ms = 0;

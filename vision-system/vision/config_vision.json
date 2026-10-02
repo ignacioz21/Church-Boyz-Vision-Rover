@@ -229,7 +229,7 @@
   },
   "deteccion_cubos": {
     "_acerca_de": "Detección de cubos por color (vision/detectors/cubos.py). El tablero es acromático —grises, blancos, negros— así que todo lo que tenga color saturado es, por definición, un objeto de interés. Ese es el filtro que separa el fondo del contenido casi gratis.",
-    "croma_minimo": 16.0,
+    "croma_minimo": 12.0,
     "_nota_croma": "Croma mínimo en Lab, `raiz(a*² + b*²)`, para que un píxel cuente como coloreado. El croma de Lab ES la saturación en sentido perceptual. Se usa Lab y no HSV para el umbral Y para la clasificación —un solo espacio— porque el matiz de HSV se vuelve inestable justo donde más importa: con poca luz o poca saturación da saltos entre extremos.",
     "matices_lab_grados": {
       "red": 39.9,
@@ -241,7 +241,7 @@
     "_EL_AMARILLO_ES_EXCLUSION": "El amarillo está en la lista aunque esta edición no tenga obstáculos, y NO es un cubo: una mancha que caiga más cerca del amarillo se descarta. Existe porque verde y amarillo están a solo 33 grados —el par más ajustado con diferencia— y sin esa clase, cualquier objeto amarillo que ande por la cancha se leería como cubo verde.",
     "matiz_tolerancia_grados": 50.0,
     "_nota_tolerancia": "Cuánto puede apartarse el matiz medido del de referencia para aceptar la clasificación. Con 45 grados, las clases no se solapan (la más cercana está a 33) y una mancha de un color que no es ninguno de los tres se descarta en vez de forzarse.",
-    "area_minima_relativa": 0.25,
+    "area_minima_relativa": 0.15,
     "area_maxima_relativa": 3.0,
     "_nota_area": "Tamaño admisible de la mancha, como fracción del área que ocuparía la cara de un cubo. Se expresa relativo y no en píxeles porque los píxeles dependen de la resolución y de la altura de la cámara. El mínimo bajo (0,25) es a propósito: un cubo empujado por un rover pierde alrededor del 22 % de su área, y hay que seguir encontrándolo.",
     "recorte_robusto": 0.75,
@@ -320,7 +320,7 @@
   },
   "camara": {
     "_acerca_de": "Webcam USB real. Cámara OFICIAL del reto: Logitech C270, 720p, enfoque manual. Su campo de visión real, medido en su propia calibración, es de 47,1° horizontal y 27,6° vertical: NO es gran angular, y por eso obliga a montarla a 2,04 m como mínimo para que entre el tablero de 1000 mm. El lado corto del sensor es el que manda.",
-    "indice": "menu",
+    "indice": 0,
     "_nota_indice": "Qué cámara usar. Tres valores posibles: (1) \"menu\" —el recomendado— muestra las cámaras detectadas numeradas, con su nombre y resolución, y pregunta cuál usar; si hay una sola, la toma sin preguntar. (2) Un número, para no elegir cada vez, una vez que se sabe cuál es. (3) \"auto\", que toma la primera que responda sin preguntar: sirve para correr sin nadie delante, pero OJO, con dos cámaras conectadas puede agarrar la equivocada.",
     "_nota_por_que_menu": "El índice de una webcam USB NO es estable: depende de qué se enchufó primero, de si hay cámara integrada y de si la máquina se reinició. Y elegir mal no da ningún error: da una calibración hecha con la cámara equivocada. Por eso conviene que elija una persona mirando la lista, en vez de que el programa adivine.",
     "backend": "auto",
@@ -340,9 +340,9 @@
       "_acerca_de": "Exposición, enfoque y balance de blancos SIEMPRE fijos, nunca en automático (CLAUDE.md, sección 5). Un ajuste que se mueve solo cambia los colores a mitad de ronda y rompe la detección. El caso más peligroso es el robot negro: con exposición automática, la cámara sube la ganancia para 'compensar' el negro y quema los marcadores blancos.",
       "exposicion": {
         "fijar": true,
-        "valor": 50,
-        "prueba_a": 25,
-        "prueba_b": 100,
+        "valor": 120,
+        "prueba_a": 60,
+        "prueba_b": 250,
         "_nota_unidades": "OJO: las unidades dependen del backend. En DSHOW el valor suele ser log2 de segundos (-6 = 1/64 s); en V4L2 son unidades de 100 microsegundos. No hay un valor universal: hay que ajustarlo mirando la imagen en la cámara y el sistema reales.",
         "_nota_prueba": "prueba_a y prueba_b son dos valores MUY distintos que se usan para verificar por efecto: si el brillo medio de la imagen no cambia entre los dos, la cámara ignoró el ajuste aunque diga que lo aceptó."
       },

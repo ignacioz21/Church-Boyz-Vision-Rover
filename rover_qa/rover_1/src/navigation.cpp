@@ -5,6 +5,10 @@
 #include <math.h>
 #include <WiFiUdp.h>
 
+static float current_pre_dist = 10.0f;
+void setPreApproachDistance(float blocks) { current_pre_dist = blocks; }
+float getPreApproachDistance() { return current_pre_dist; }
+
 static WiFiUDP udpMap;
 static bool udpInitialized = false;
 
@@ -304,6 +308,21 @@ void patrol_border() {
         float y = snap.my_rover.y;
         float h = snap.my_rover.heading;
         
+        // ---------------------------------------------------------
+        // SISTEMA DE INTERSECCION Y TRAFICO
+        // ---------------------------------------------------------
+        if (snap.peer_rover.detected) {
+            float peer_dist = sqrt(pow(x - snap.peer_rover.x, 2) + pow(y - snap.peer_rover.y, 2));
+            
+            // Si están a menos de 20 celdas (40cm) de distancia, el Rover 11 cede el paso
+            if (peer_dist < 20.0f && telemetryGetRoverId() == 11) {
+                stopMotors();
+                Serial.println("[TRAFICO] Peligro de colision dinamico. Rover 11 cede el paso al Rover 10...");
+                delay(100);
+                continue; 
+            }
+        }
+        
         Waypoint wp = route[target_wp];
         debug_target_x = wp.x;
         debug_target_y = wp.y;
@@ -440,21 +459,35 @@ bool calculateAvoidanceWaypoint(float rx, float ry, float tx, float ty, const Te
     }
     
     if (collision) {
-        float vec_to_obst_x = closest_obst_x - (rx + min_dist_along * path_nx);
-        float vec_to_obst_y = closest_obst_y - (ry + min_dist_along * path_ny);
+        // Smart Vector Deflection: Check both sides and pick the safest (closest to center)
+        float side1_nx = -path_ny;
+        float side1_ny = path_nx;
+        float side2_nx = path_ny;
+        float side2_ny = -path_nx;
         
-        float side_nx = -path_ny;
-        float side_ny = path_nx;
-        if (vec_to_obst_x * side_nx + vec_to_obst_y * side_ny > 0) {
-            side_nx = path_ny;
-            side_ny = -path_nx;
+        float base_x = rx + min_dist_along * path_nx;
+        float base_y = ry + min_dist_along * path_ny;
+        
+        float wx1 = base_x + side1_nx * 6.0f;
+        float wy1 = base_y + side1_ny * 6.0f;
+        
+        float wx2 = base_x + side2_nx * 6.0f;
+        float wy2 = base_y + side2_ny * 6.0f;
+        
+        float mid_x = snap.grid_cols / 2.0f;
+        float mid_y = snap.grid_rows / 2.0f;
+        
+        float dist1_to_center = sqrt(pow(wx1 - mid_x, 2) + pow(wy1 - mid_y, 2));
+        float dist2_to_center = sqrt(pow(wx2 - mid_x, 2) + pow(wy2 - mid_y, 2));
+        
+        if (dist1_to_center < dist2_to_center) {
+            out_wx = wx1; out_wy = wy1;
+        } else {
+            out_wx = wx2; out_wy = wy2;
         }
         
-        out_wx = rx + min_dist_along * path_nx + side_nx * 5.0f;
-        out_wy = ry + min_dist_along * path_ny + side_ny * 5.0f;
-        
-        out_wx = constrain(out_wx, 2.0f, snap.grid_cols - 2.0f);
-        out_wy = constrain(out_wy, 2.0f, snap.grid_rows - 2.0f);
+        out_wx = constrain(out_wx, 3.0f, snap.grid_cols - 3.0f);
+        out_wy = constrain(out_wy, 3.0f, snap.grid_rows - 3.0f);
         return true;
     }
     return false;
@@ -522,21 +555,32 @@ bool hunt_cube(CubeColor target_color) {
     float len = sqrt(dx*dx + dy*dy);
     if (len == 0.0f) len = 1.0f;
     
-    float pre_x = cube_x + (dx/len) * 5.0f;
-    float pre_y = cube_y + (dy/len) * 5.0f;
+    float pre_x = cube_x + (dx/len) * current_pre_dist;
+    float pre_y = cube_y + (dy/len) * current_pre_dist;
+    pre_x = constrain(pre_x, 3.0f, snap.grid_cols - 3.0f);
+    pre_y = constrain(pre_y, 3.0f, snap.grid_rows - 3.0f);
 
     float push_target_x = depot_x + (dx/len) * 4.0f;
     float push_target_y = depot_y + (dy/len) * 4.0f;
 
-    enum HuntState { TURN_PRE, DRIVE_PRE, TURN_AVOID, DRIVE_AVOID, VERIFY_TELEMETRY_CUBE, TURN_APPROACH, SENSOR_APPROACH, TURN_PUSH, DRIVE_PUSH, BACKUP_AWAY, VERIFY_DROP };
+    enum HuntState { TURN_PRE, DRIVE_PRE, TURN_AVOID, DRIVE_AVOID, VERIFY_TELEMETRY_CUBE, TURN_APPROACH, SENSOR_APPROACH, TURN_PUSH, DRIVE_PUSH, BACKUP_AWAY, VERIFY_DROP, BACKUP_RETRY };
     HuntState state = TURN_PRE;
     unsigned long wait_start_ms = 0;
+    unsigned long mission_start_ms = millis();
     float avoid_x = 0, avoid_y = 0;
+    unsigned long yield_start_ms = 0;
+    bool is_yielding = false;
+    bool ignore_traffic = false;
     
     setLedColor(255, 128, 0); 
     bool success = false;
 
     while (true) {
+        float current_cruise = QA_SPEED_CRUISE;
+        if (telemetryGetRoverId() == 11 && (millis() - mission_start_ms < 3000)) {
+            current_cruise = QA_SPEED_CRUISE * 0.6f;
+        }
+
         if (checkAbort(udpCmd)) {
             setLedColor(255, 0, 0); 
             break; 
@@ -546,6 +590,54 @@ bool hunt_cube(CubeColor target_color) {
         float x = snap.my_rover.x;
         float y = snap.my_rover.y;
         float h = snap.my_rover.heading;
+        
+        // ACTUALIZACION DINAMICA DE RUTA (Si el cubo se mueve o la camara ajusta la coordenada)
+        if (state < TURN_PUSH && snap.cubes[target_color].detected) {
+            cube_x = snap.cubes[target_color].x;
+            cube_y = snap.cubes[target_color].y;
+            
+            float depot_x = snap.depots[target_color].x;
+            float depot_y = snap.depots[target_color].y;
+            
+            float dx = cube_x - depot_x;
+            float dy = cube_y - depot_y;
+            float len = sqrt(dx*dx + dy*dy);
+            if (len == 0.0f) len = 1.0f;
+            
+            pre_x = cube_x + (dx/len) * current_pre_dist;
+            pre_y = cube_y + (dy/len) * current_pre_dist;
+            pre_x = constrain(pre_x, 3.0f, snap.grid_cols - 3.0f);
+            pre_y = constrain(pre_y, 3.0f, snap.grid_rows - 3.0f);
+
+            push_target_x = depot_x + (dx/len) * 4.0f;
+            push_target_y = depot_y + (dy/len) * 4.0f;
+        }
+        
+        // ---------------------------------------------------------
+        // SISTEMA DE INTERSECCION Y TRAFICO
+        // ---------------------------------------------------------
+        if (!ignore_traffic && snap.peer_rover.detected && state != DRIVE_PUSH && state != TURN_PUSH) {
+            float peer_dist = sqrt(pow(x - snap.peer_rover.x, 2) + pow(y - snap.peer_rover.y, 2));
+            
+            if (peer_dist < 20.0f && telemetryGetRoverId() == 11) {
+                if (!is_yielding) {
+                    is_yielding = true;
+                    yield_start_ms = millis();
+                }
+                
+                if (millis() - yield_start_ms > 4000) {
+                    Serial.println("[TRAFICO] Rover 10 inactivo. Ignorando regla de trafico para rodearlo.");
+                    ignore_traffic = true;
+                } else {
+                    stopMotors();
+                    Serial.println("[TRAFICO] Cediendo el paso al Rover 10...");
+                    delay(100);
+                    continue; 
+                }
+            } else {
+                is_yielding = false;
+            }
+        }
         
         if (state == TURN_PRE || state == DRIVE_PRE) {
             if (calculateAvoidanceWaypoint(x, y, pre_x, pre_y, snap, target_color, avoid_x, avoid_y)) {
@@ -575,6 +667,14 @@ bool hunt_cube(CubeColor target_color) {
         debug_path_p3_y = (state == TURN_PUSH || state == DRIVE_PUSH) ? push_target_y : depot_y;
 
         float dist = sqrt(pow(target_x - x, 2) + pow(target_y - y, 2));
+        float dx_target = target_x - x;
+        float dy_target = target_y - y;
+        float dx_rover = cos(h * M_PI / 180.0f);
+        float dy_rover = -sin(h * M_PI / 180.0f); 
+        float dot_prod = dx_target * dx_rover + dy_target * dy_rover;
+        bool waypoint_reached = (dist < CORNER_ARRIVE_TOL_CELLS) || (dist < 4.0f && dot_prod < 0);
+        bool strict_waypoint_reached = (dist < 2.0f) || (dist < 4.0f && dot_prod < 0);
+        
         float target_h = atan2(-(target_y - y), (target_x - x)) * 180.0f / M_PI;
         if (target_h < 0) target_h += 360.0f;
         
@@ -583,22 +683,22 @@ bool hunt_cube(CubeColor target_color) {
         while (diff > 180.0f) diff -= 360.0f;
 
         if (state == TURN_PRE || state == TURN_PUSH || state == TURN_AVOID || state == TURN_APPROACH) {
-            if (fabs(diff) < 5.0f) {
+            if (fabs(diff) < 20.0f) {
                 stopMotors();
                 if (state == TURN_PRE) state = DRIVE_PRE;
                 else if (state == TURN_PUSH) state = DRIVE_PUSH;
                 else if (state == TURN_AVOID) state = DRIVE_AVOID;
                 else if (state == TURN_APPROACH) state = SENSOR_APPROACH;
-                delay(300);
+                delay(150);
             } else {
                 float turn_speed = diff * 0.008f;
-                if (turn_speed > 0 && turn_speed < 0.18f) turn_speed = 0.18f;
-                if (turn_speed < 0 && turn_speed > -0.18f) turn_speed = -0.18f;
+                if (turn_speed > 0 && turn_speed < 0.15f) turn_speed = 0.15f;
+                if (turn_speed < 0 && turn_speed > -0.15f) turn_speed = -0.15f;
                 turn_speed = constrain(turn_speed, -QA_SPEED_PIVOT, QA_SPEED_PIVOT);
                 setMotors(-turn_speed, turn_speed);
             }
         } else if (state == DRIVE_AVOID) {
-            if (dist < CORNER_ARRIVE_TOL_CELLS) {
+            if (waypoint_reached) {
                 stopMotors();
                 Serial.println("[HUNT] Waypoint de desvio alcanzado. Retomando ruta...");
                 state = TURN_PRE;
@@ -607,11 +707,10 @@ bool hunt_cube(CubeColor target_color) {
                 float correction = 0.0f;
                 if (fabs(diff) > ANGLE_DEADBAND_DEG) correction = diff * KP_STEERING;
                 correction = constrain(correction, -0.12f, 0.12f);
-                setMotors(QA_SPEED_CRUISE - correction, QA_SPEED_CRUISE + correction);
+                setMotors(current_cruise - correction, current_cruise + correction);
             }
         } else if (state == DRIVE_PRE) {
-            float dist_to_cube = sqrt(pow(cube_x - x, 2) + pow(cube_y - y, 2));
-            if (dist_to_cube <= 5.5f) { // Frena exactamente a 5.5 bloques del cubo
+            if (strict_waypoint_reached) { // Llegada estricta al punto matemático pre_x, pre_y
                 stopMotors();
                 Serial.println("[HUNT] Pre-approach alcanzado. Verificando telemetria...");
                 state = VERIFY_TELEMETRY_CUBE;
@@ -621,7 +720,7 @@ bool hunt_cube(CubeColor target_color) {
                 float correction = 0.0f;
                 if (fabs(diff) > ANGLE_DEADBAND_DEG) correction = diff * KP_STEERING;
                 correction = constrain(correction, -0.12f, 0.12f);
-                setMotors(QA_SPEED_CRUISE - correction, QA_SPEED_CRUISE + correction);
+                setMotors(current_cruise - correction, current_cruise + correction);
             }
         } else if (state == VERIFY_TELEMETRY_CUBE) {
             stopMotors();
@@ -632,7 +731,7 @@ bool hunt_cube(CubeColor target_color) {
                 }
             }
             if (c_x >= 0) {
-                if (sqrt(pow(c_x - x, 2) + pow(c_y - y, 2)) < 8.0f) {
+                if (sqrt(pow(c_x - x, 2) + pow(c_y - y, 2)) < (current_pre_dist + 3.0f)) {
                     Serial.println("[HUNT] Cubo cerca, pivotando hacia el cubo antes de avanzar...");
                     state = TURN_APPROACH;
                 }
@@ -644,27 +743,46 @@ bool hunt_cube(CubeColor target_color) {
             }
         } else if (state == SENSOR_APPROACH) {
             float sonar_cm = readUltrasonicCm();
-            if (sonar_cm > 0.0f && sonar_cm < 12.0f) {
+            
+            if (sonar_cm > 0.0f && sonar_cm < 8.0f) {
                 stopMotors();
-                Serial.println("[HUNT] Fisicamente interceptado. Check de color...");
-                delay(500);
-                if (verifyCubeColor(target_color)) {
-                    Serial.println("[HUNT] Color OK. STATUS SOSTENIDO.");
+                Serial.println("[HUNT] Contacto fisico detectado. Verificando color del cubo...");
+                delay(500); 
+                
+                bool color_ok = verifyCubeColor(target_color);
+                
+                // Si el sensor de color falla o no esta conectado, usar telemetria fresca como fallback estricto
+                if (!color_ok) {
+                    TelemetrySnapshot fresh_snap;
+                    if (telemetryGetSnapshot(fresh_snap) && fresh_snap.cubes[target_color].detected) {
+                        float cx = fresh_snap.cubes[target_color].x;
+                        float cy = fresh_snap.cubes[target_color].y;
+                        float grip_dist = sqrt(pow(cx - x, 2) + pow(cy - y, 2));
+                        if (grip_dist < 10.0f) {
+                            Serial.println("[HUNT] Sensor de color fallo, pero Camara confirma que el cubo correcto esta en las pinzas.");
+                            color_ok = true;
+                        }
+                    }
+                }
+                
+                if (color_ok) {
+                    Serial.println("[HUNT] CONFIRMADO: Cubo capturado.");
                     setLedColor(0, 255, 128);
                     state = TURN_PUSH;
                 } else {
-                    setLedColor(255, 0, 0);
-                    break;
+                    Serial.println("[HUNT] ERROR: Color incorrecto o no hay cubo. Iniciando BACKUP_RETRY.");
+                    setLedColor(255, 128, 0);
+                    state = BACKUP_RETRY;
+                    wait_start_ms = millis();
                 }
             } else {
                 float correction = 0.0f;
                 if (fabs(diff) > ANGLE_DEADBAND_DEG) correction = diff * KP_STEERING;
                 correction = constrain(correction, -0.12f, 0.12f);
-                float slow = 0.17f;
-                setMotors(slow - correction, slow + correction);
+                setMotors(0.18f - correction, 0.18f + correction);
             }
         } else if (state == DRIVE_PUSH) {
-            if (dist < CORNER_ARRIVE_TOL_CELLS) {
+            if (waypoint_reached) {
                 stopMotors();
                 Serial.println("[HUNT] Deposito alcanzado. Retrocediendo...");
                 state = BACKUP_AWAY;
@@ -673,7 +791,14 @@ bool hunt_cube(CubeColor target_color) {
                 float correction = 0.0f;
                 if (fabs(diff) > ANGLE_DEADBAND_DEG) correction = diff * KP_STEERING;
                 correction = constrain(correction, -0.12f, 0.12f);
-                setMotors(QA_SPEED_CRUISE - correction, QA_SPEED_CRUISE + correction);
+                setMotors(current_cruise - correction, current_cruise + correction);
+            }
+        } else if (state == BACKUP_RETRY) {
+            if (millis() - wait_start_ms > 1000) {
+                stopMotors();
+                state = TURN_APPROACH;
+            } else {
+                setMotors(-0.25f, -0.25f);
             }
         } else if (state == BACKUP_AWAY) {
             if (millis() - wait_start_ms > 1000) {
@@ -785,40 +910,106 @@ void hunt_reto_mission() {
     bool cube_assigned[3] = {false, false, false};
     int assigned_to[3] = {-1, -1, -1};
     
-    float rx_me = snap.my_rover.x;
-    float ry_me = snap.my_rover.y;
-    float rx_peer = snap.peer_rover.detected ? snap.peer_rover.x : 999.0f; // Si no lo vemos, asumimos lejos
-    float ry_peer = snap.peer_rover.detected ? snap.peer_rover.y : 999.0f;
+    float rx_10, ry_10, rx_11, ry_11;
+    if (my_id == 10) {
+        rx_10 = snap.my_rover.x; ry_10 = snap.my_rover.y;
+        rx_11 = snap.peer_rover.detected ? snap.peer_rover.x : 999.0f;
+        ry_11 = snap.peer_rover.detected ? snap.peer_rover.y : 999.0f;
+    } else {
+        rx_11 = snap.my_rover.x; ry_11 = snap.my_rover.y;
+        rx_10 = snap.peer_rover.detected ? snap.peer_rover.x : 999.0f;
+        ry_10 = snap.peer_rover.detected ? snap.peer_rover.y : 999.0f;
+    }
     
-    for (int step = 0; step < 3; step++) {
-        float min_dist = 99999.0f;
-        int best_c = -1;
-        int best_rover = -1;
-        
-        for (int c = 0; c < 3; c++) {
-            if (cube_assigned[c] || !snap.cubes[c].detected) continue;
-            
-            // Distancia a MI
-            float d_me = sqrt(pow(snap.cubes[c].x - rx_me, 2) + pow(snap.cubes[c].y - ry_me, 2));
-            if (d_me < min_dist) {
-                min_dist = d_me;
-                best_c = c;
-                best_rover = my_id;
-            }
-            
-            // Distancia al PEER
-            float d_peer = sqrt(pow(snap.cubes[c].x - rx_peer, 2) + pow(snap.cubes[c].y - ry_peer, 2));
-            if (d_peer < min_dist) {
-                min_dist = d_peer;
-                best_c = c;
-                best_rover = peer_id;
+    // --- NUEVA LÓGICA DE ASIGNACIÓN (Minimización del Costo Total) ---
+    float cost_matrix[2][3];
+    for (int c=0; c<3; c++) {
+        if (snap.cubes[c].detected) {
+            cost_matrix[0][c] = sqrt(pow(snap.cubes[c].x - rx_10, 2) + pow(snap.cubes[c].y - ry_10, 2));
+            cost_matrix[1][c] = sqrt(pow(snap.cubes[c].x - rx_11, 2) + pow(snap.cubes[c].y - ry_11, 2));
+        } else {
+            cost_matrix[0][c] = 9999.0f; cost_matrix[1][c] = 9999.0f;
+        }
+    }
+
+    int best_r10_c = -1; int best_r11_c = -1;
+    float min_total = 99999.0f;
+
+    for (int c10=0; c10<3; c10++) {
+        for (int c11=0; c11<3; c11++) {
+            if (c10 == c11) continue; 
+            float total = cost_matrix[0][c10] + cost_matrix[1][c11];
+            if (total < min_total) {
+                min_total = total;
+                best_r10_c = c10;
+                best_r11_c = c11;
             }
         }
-        
-        if (best_c != -1) {
-            cube_assigned[best_c] = true;
-            assigned_to[best_c] = best_rover;
-            Serial.printf("[RETO] Cubo %d asignado al Rover %d (dist: %.1f)\n", best_c, best_rover, min_dist);
+    }
+    
+    // Asignar los dos primeros cubos
+    if (best_r10_c != -1) assigned_to[best_r10_c] = 10;
+    if (best_r11_c != -1) assigned_to[best_r11_c] = 11;
+    
+    // Asignar el 3er cubo sobrante al rover mas cercano a el
+    for (int c=0; c<3; c++) {
+        if (c != best_r10_c && c != best_r11_c) {
+            if (cost_matrix[0][c] < cost_matrix[1][c]) {
+                assigned_to[c] = 10;
+            } else {
+                assigned_to[c] = 11;
+            }
+        }
+    }
+    
+    for (int c=0; c<3; c++) {
+        if (assigned_to[c] != -1) {
+            Serial.printf("[RETO] Cubo %d asignado al Rover %d\n", c, assigned_to[c]);
+        }
+    }
+    
+    // Desincronizacion Espacial (Temporal reemplazada por límite de velocidad)
+    if (my_id == 10) {
+        setPreApproachDistance(15.0f); 
+        Serial.println("[RETO] Estrategia: Alineacion Temprana (Rover 10)");
+    } else {
+        setPreApproachDistance(8.0f);  
+        Serial.println("[RETO] Estrategia: Alineacion Tardia (Rover 11). Limite vel. inicial 60%.");
+    }
+    
+    // --- LOGICA DE FASE 1: SECUENCIACION ---
+    int mis_cubos = 0;
+    int sus_cubos = 0;
+    for (int c = 0; c < 3; c++) {
+        if (assigned_to[c] == my_id) mis_cubos++;
+        if (assigned_to[c] == peer_id) sus_cubos++;
+    }
+
+    if (mis_cubos == 1 && sus_cubos == 2) {
+        Serial.println("[RETO] FASE 1: Me toco 1 solo cubo. Esperare pacientemente a que el companero termine los suyos...");
+        while (true) {
+            extern WiFiUDP udpCmd;
+            if (checkAbort(udpCmd)) return;
+            
+            TelemetrySnapshot snap_wait;
+            if (telemetryGetSnapshot(snap_wait)) {
+                // Verificar visualmente si los 2 cubos del companero ya llegaron al deposito
+                int cubos_en_deposito = 0;
+                for (int c = 0; c < 3; c++) {
+                    if (assigned_to[c] == peer_id) {
+                        float cx = snap_wait.cubes[c].x; float cy = snap_wait.cubes[c].y;
+                        float dx = snap_wait.depots[c].x; float dy = snap_wait.depots[c].y;
+                        if (sqrt(pow(cx - dx, 2) + pow(cy - dy, 2)) < 8.0f) {
+                            cubos_en_deposito++;
+                        }
+                    }
+                }
+                if (cubos_en_deposito == 2) {
+                    Serial.println("[RETO] El companero completo su mision. iEs mi turno!");
+                    break; // Se levanta el bloqueo y arranca
+                }
+            }
+            delay(500);
         }
     }
     

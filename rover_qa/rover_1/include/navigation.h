@@ -21,5 +21,7 @@ void patrol_border();
 bool hunt_cube(CubeColor target_color);
 void hunt_multiple_cubes(int count);
 void hunt_reto_mission();
+void setPreApproachDistance(float blocks); 
+float getPreApproachDistance();
 
 #endif // NAVIGATION_H

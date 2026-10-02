@@ -6,7 +6,7 @@
 // =============================================================================
 // 1. IDENTIFICACIÓN OFICIAL DEL ROVER
 // =============================================================================
-#define ROVER_ID                11          // 10 u 11 (ID ArUco de este robot)
+#define ROVER_ID                10          // 10 u 11 (ID ArUco de este robot)
 #define ROVER_PEER_ID           10          // ID ArUco del robot compañero
 
 // =============================================================================
@@ -31,8 +31,8 @@
 #define PIN_M2B                 15          // Motor Derecho Canal B
 
 // Polaridad física (Motores montados en sentidos opuestos en el chasis)
-#define INVERT_MOTOR_L          false       // Motor Izquierdo
-#define INVERT_MOTOR_R          true        // Motor Derecho (invertido como solicitaste)
+#define INVERT_MOTOR_L          true        // Motor Izquierdo
+#define INVERT_MOTOR_R          true        // Motor Derecho
 
 // Calibración de Motores (Trim) para compensar asimetrías mecánicas
 // Si el robot se desvía a la izquierda, reduce el TRIM derecho (ej. 0.95f) o viceversa.
