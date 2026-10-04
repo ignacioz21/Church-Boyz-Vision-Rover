@@ -1,0 +1,52 @@
+#ifndef ROVER_MOTION_H
+#define ROVER_MOTION_H
+
+#include "types.h"
+
+// Pose estimada AHORA: la última de la cámara adelantada con las órdenes de
+// motor dadas desde que se capturó (compensa la latencia del lazo).
+//
+// OJO: 'p' es el EJE DE LAS RUEDAS (el punto sobre el que gira el robot), no el
+// marcador. Así un pivote no mueve el punto que se controla. El marcador está
+// AXLE_OFFSET por delante.
+struct Pose {
+    Point p;
+    float theta = 0.0f;
+};
+Pose motionPredict(const TelemetrySnapshot &snap);
+
+// Toda orden de motor de la estrategia pasa por aquí: queda registrada para la predicción
+void motionDrive(float left, float right);
+void motionStop();
+
+// Primitivas NO bloqueantes: llamar en cada ciclo; devuelven true al terminar (y frenan).
+// Usan la huella real del robot: 'snap' para saber qué hay alrededor y 'carried'
+// para ignorar el cubo que va en las pinzas (COLOR_UNKNOWN si no lleva ninguno).
+
+// Pivota hacia el rumbo por el lado en que las pinzas no pasan sobre un cubo ni
+// sobre la línea. Si ningún lado es seguro, hace sitio en línea recta. Con un cubo
+// en las pinzas gira despacio, para que la pinza lo arrastre sin soltarlo.
+bool motionTurnTo(const Pose &pose, float target_heading, float tol_deg,
+                  const TelemetrySnapshot &snap, CubeColor carried);
+
+// Va al punto corrigiendo el rumbo en arco; solo pivota si el desvío es grande.
+bool motionGoTo(const Pose &pose, Point target, float tol, float max_power,
+                const TelemetrySnapshot &snap, CubeColor carried);
+
+// Órdenes de motor para el tramo final de una entrega: avanza recto hacia 'to'
+// con el cubo contra el frente, corrigiendo apenas el rumbo.
+// 'cube_ahead' = distancia eje -> centro del cubo.
+void carryCommand(const Pose &pose, Point to, float cube_ahead, float &left, float &right);
+
+// Calibración (BLOQUEA ~4 s y mueve el robot: ~20 cm adelante y un giro).
+// Mide latencia y ganancias, las deja activas y las imprime para copiar a config.h.
+void motionCalibrate();
+
+struct MotionCal {
+    float latency_ms;
+    float speed_gain;   // celdas/s por unidad de potencia
+    float turn_gain;    // grados/s por unidad de potencia
+};
+const MotionCal& motionCal();
+
+#endif // ROVER_MOTION_H

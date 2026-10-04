@@ -1,0 +1,280 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Rover Dashboard</title>
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f5f5f5; color: #333; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        .header { background: #fff; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #ccc; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .header h1 { margin: 0; font-size: 1.5rem; color: #2e7d32; }
+        .status-bar { font-size: 0.9rem; color: #666; font-weight: bold; }
+        
+        .main-container { display: flex; flex: 1; overflow: hidden; }
+        
+        /* Left Column */
+        .left-panel { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #ccc; background: #fafafa; position: relative; }
+        .video-container { flex: 1; display: flex; justify-content: center; align-items: center; overflow: hidden; position: relative; background: #e0e0e0; }
+        .video-container img { max-width: 100%; max-height: 100%; object-fit: contain; }
+        .video-overlay { position: absolute; top: 10px; left: 10px; background: rgba(255,255,255,0.8); color: #000; padding: 5px 10px; border-radius: 5px; font-family: monospace; font-weight: bold; border: 1px solid #ccc; }
+        
+        .vision-logs { height: 200px; background: #fff; border-top: 1px solid #ccc; padding: 10px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+        
+        /* Right Column */
+        .right-panel { width: 500px; display: flex; flex-direction: column; background: #fff; }
+        
+        .map-container { height: 350px; background: #eee; border-bottom: 1px solid #ccc; position: relative; display: flex; justify-content: center; align-items: center; }
+        #mapCanvas { background: #111; max-width: 100%; max-height: 100%; }
+        
+        .controls { padding: 15px; border-bottom: 2px solid #333; }
+        .controls-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        button { background: #333; color: white; border: none; padding: 10px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        button:hover { background: #444; }
+        button.danger { background: #d32f2f; }
+        button.danger:hover { background: #b71c1c; }
+        button.action { background: #1976d2; }
+        button.action:hover { background: #1565c0; }
+        button.success { background: #388e3c; }
+        button.success:hover { background: #2e7d32; }
+        
+        .brain-logs { flex: 1; background: #f9f9f9; padding: 10px; overflow-y: auto; font-family: monospace; font-size: 13px; border-top: 1px solid #eee; }
+        
+        /* Log Tag Colors */
+        .log-line { margin: 2px 0; border-bottom: 1px solid #eee; padding-bottom: 2px; }
+        .tag-tx { color: #f57f17; font-weight: bold; }
+        .tag-rx { color: #0277bd; font-weight: bold; }
+        .tag-brain { color: #2e7d32; font-weight: bold; }
+        .tag-err { color: #c62828; font-weight: bold; }
+        .tag-vision { color: #6a1b9a; font-weight: bold; }
+        
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Vision Rover Command Center</h1>
+        <div class="status-bar" id="connection-status">Desconectado</div>
+    </div>
+    
+    <div class="main-container">
+        <!-- Panel Izquierdo: Camara y Logs de Vision -->
+        <div class="left-panel">
+            <div class="video-container">
+                <div class="video-overlay">CAMARA EN VIVO</div>
+                <img id="videoStream" alt="Video stream desconectado" onerror="this.alt='Esperando señal de video en puerto 8080...'; this.style.display='none'; setTimeout(initVideoStream, 2000);">
+            </div>
+            <div class="vision-logs" id="visionLogs">
+                <div style="color: #666;">-- Logs del Sistema de Visión --</div>
+            </div>
+        </div>
+        
+        <!-- Panel Derecho: Mapa, Comandos y Logs Cerebro -->
+        <div class="right-panel">
+            <div class="map-container">
+                <canvas id="mapCanvas" width="400" height="350"></canvas>
+            </div>
+            
+            <div class="controls">
+                <div class="controls-grid">
+                    <button class="action" onclick="sendCommand('PLAN_10')">Trazar R10 (t1)</button>
+                    <button class="action" onclick="sendCommand('EXEC_10')">Ejecutar R10 (e1)</button>
+                    <button class="action" onclick="sendCommand('PLAN_11')">Trazar R11 (t2)</button>
+                    <button class="action" onclick="sendCommand('EXEC_11')">Ejecutar R11 (e2)</button>
+                    <button class="success" onclick="sendCommand('PLAN_ALL')">Trazar Ambos (tt)</button>
+                    <button class="success" onclick="sendCommand('AUTO')">Ejecutar AUTO (ee)</button>
+                    <button class="danger" onclick="sendCommand('IDLE')">IDLE / PARAR ROVERS (0)</button>
+                    <button class="danger" onclick="sendVisionCommand('abort')">ABORTAR VISION</button>
+                    <button class="action" onclick="sendVisionCommand('ready')">READY VISION</button>
+                    <button class="action" onclick="sendVisionCommand('stop')">STOP VISION</button>
+                    
+                    <!-- Botones de Sistema -->
+                    <button class="success" style="background: #e65100; margin-top: 15px;" onclick="sendCommand('RESTART_BRAIN')">⚡ ENCENDER CEREBRO</button>
+                    <button class="success" style="background: #e65100; margin-top: 15px;" onclick="sendCommand('RESTART_VISION')">📷 ENCENDER VISIÓN</button>
+                </div>
+            </div>
+            
+            <div class="brain-logs" id="brainLogs">
+                <div style="color: #666;">-- Logs del Cerebro Central --</div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+    <script>
+        const canvas = document.getElementById('mapCanvas');
+        const ctx = canvas.getContext('2d');
+        const brainLogs = document.getElementById('brainLogs');
+        const visionLogs = document.getElementById('visionLogs');
+        const connStatus = document.getElementById('connection-status');
+        
+        // Init video stream dynamically
+        function initVideoStream() {
+            const host = window.location.hostname;
+            const video = document.getElementById('videoStream');
+            video.src = `http://${host}:8080/video_feed?` + new Date().getTime();
+            video.style.display = 'block';
+        }
+        initVideoStream();
+        
+        function sendVisionCommand(cmd) {
+            const host = window.location.hostname;
+            fetch(`http://${host}:8080/command?cmd=${cmd}`)
+                .then(r => appendVisionLog('SYS', 'Enviado: ' + cmd))
+                .catch(e => appendVisionLog('ERR', 'Error red: ' + cmd));
+        }
+
+        // Conectar al Cerebro (WebSockets)
+        const socket = io(); // Connects back to the same host that served the page
+        
+        socket.on('connect', () => {
+            connStatus.innerHTML = '<span style="color:#4CAF50">Cerebro: Conectado</span>';
+            appendBrainLog('SYS', 'Conexión WebSocket establecida.');
+        });
+        
+        socket.on('disconnect', () => {
+            connStatus.innerHTML = '<span style="color:#f44336">Cerebro: Desconectado</span>';
+            appendBrainLog('ERR', 'Desconectado del Cerebro.');
+        });
+        
+        // Recibir logs estructurados
+        socket.on('log', (data) => {
+            if(data.source === 'VISION') {
+                appendVisionLog(data.tag, data.msg);
+            } else {
+                appendBrainLog(data.tag, data.msg);
+            }
+        });
+        
+        // Recibir estado del mapa
+        socket.on('map_state', (data) => {
+            drawMap(data);
+        });
+        
+        function sendCommand(cmd) {
+            appendBrainLog('TX', `Enviando comando UI: ${cmd}`);
+            socket.emit('ui_command', { cmd: cmd });
+        }
+        
+        function appendBrainLog(tag, msg) {
+            const div = document.createElement('div');
+            div.className = 'log-line';
+            let tagClass = 'tag-brain';
+            if(tag === 'TX') tagClass = 'tag-tx';
+            if(tag === 'RX') tagClass = 'tag-rx';
+            if(tag === 'ERR' || tag === 'ERROR') tagClass = 'tag-err';
+            
+            const time = new Date().toLocaleTimeString('es-ES', {hour12: false});
+            div.innerHTML = `<span style="color:#555">[${time}]</span> <span class="${tagClass}">[${tag}]</span> ${msg}`;
+            brainLogs.appendChild(div);
+            if(brainLogs.children.length > 200) brainLogs.removeChild(brainLogs.children[1]);
+            brainLogs.scrollTop = brainLogs.scrollHeight;
+        }
+
+        function appendVisionLog(tag, msg) {
+            const div = document.createElement('div');
+            div.className = 'log-line';
+            const time = new Date().toLocaleTimeString('es-ES', {hour12: false});
+            div.innerHTML = `<span style="color:#555">[${time}]</span> <span class="tag-vision">[${tag}]</span> ${msg}`;
+            visionLogs.appendChild(div);
+            if(visionLogs.children.length > 100) visionLogs.removeChild(visionLogs.children[1]);
+            visionLogs.scrollTop = visionLogs.scrollHeight;
+        }
+        
+        // Dibujador del Mapa en Canvas
+        function drawMap(data) {
+            if(!data || !data.grid) return;
+            
+            const scaleX = canvas.width / data.grid.cols;
+            const scaleY = canvas.height / data.grid.rows;
+            
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Dibujar Rutas
+            ctx.lineWidth = 2;
+            if(data.routes) {
+                if(data.routes["10"]) drawRoute(data.routes["10"], '#fbc02d', scaleX, scaleY);
+                if(data.routes["11"]) drawRoute(data.routes["11"], '#ab47bc', scaleX, scaleY);
+            }
+            
+            // Dibujar Depositos
+            if(data.depots) {
+                data.depots.forEach(d => {
+                    let color = '#555';
+                    if(d.color === 'red') color = 'rgba(255,0,0,0.3)';
+                    if(d.color === 'green') color = 'rgba(0,255,0,0.3)';
+                    if(d.color === 'blue') color = 'rgba(0,0,255,0.3)';
+                    ctx.fillStyle = color;
+                    ctx.fillRect(d.col * scaleX - 15, d.row * scaleY - 15, 30, 30);
+                    ctx.strokeStyle = color.replace('0.3','1.0');
+                    ctx.strokeRect(d.col * scaleX - 15, d.row * scaleY - 15, 30, 30);
+                });
+            }
+            
+            // Dibujar Cubos
+            if(data.cubes) {
+                data.cubes.forEach(c => {
+                    let color = '#fff';
+                    if(c.color === 'red') color = '#ff3333';
+                    if(c.color === 'green') color = '#33ff33';
+                    if(c.color === 'blue') color = '#3333ff';
+                    ctx.fillStyle = color;
+                    ctx.beginPath();
+                    ctx.arc(c.col * scaleX, c.row * scaleY, 8, 0, Math.PI*2);
+                    ctx.fill();
+                    ctx.strokeStyle = '#000';
+                    ctx.stroke();
+                });
+            }
+            
+            // Dibujar Rovers
+            if(data.rovers) {
+                data.rovers.forEach(r => {
+                    const cx = r.col * scaleX;
+                    const cy = r.row * scaleY;
+                    const h = (r.heading || 0) * Math.PI / 180;
+                    
+                    ctx.save();
+                    ctx.translate(cx, cy);
+                    ctx.rotate(h);
+                    
+                    ctx.fillStyle = (r.id === 10) ? '#fbc02d' : '#ab47bc';
+                    ctx.fillRect(-10, -10, 20, 20);
+                    
+                    // Flecha direccion
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath();
+                    ctx.moveTo(10, 0);
+                    ctx.lineTo(0, 5);
+                    ctx.lineTo(0, -5);
+                    ctx.fill();
+                    
+                    ctx.restore();
+                    
+                    // Texto ID
+                    ctx.fillStyle = '#000';
+                    ctx.font = 'bold 10px Arial';
+                    ctx.fillText('R'+r.id, cx-8, cy+20);
+                });
+            }
+        }
+        
+        function drawRoute(rt, color, scaleX, scaleY) {
+            if(!rt || !rt.p1 || !rt.p2 || !rt.p3) return;
+            ctx.strokeStyle = color;
+            ctx.setLineDash([5, 5]);
+            ctx.beginPath();
+            ctx.moveTo(rt.p1[0] * scaleX, rt.p1[1] * scaleY);
+            ctx.lineTo(rt.p2[0] * scaleX, rt.p2[1] * scaleY);
+            ctx.lineTo(rt.p3[0] * scaleX, rt.p3[1] * scaleY);
+            ctx.stroke();
+            ctx.setLineDash([]);
+            
+            // Punto Pre-approach
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(rt.p2[0] * scaleX, rt.p2[1] * scaleY, 3, 0, Math.PI*2);
+            ctx.fill();
+        }
+    </script>
+</body>
+</html>

@@ -36,7 +36,56 @@ from __future__ import annotations
 
 import math
 
+
 import cv2
+cmd_queue = []
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, HTTPServer
+import socketserver
+
+class VideoStreamHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        import urllib.parse
+        parsed_path = urllib.parse.urlparse(self.path)
+        if parsed_path.path == '/command':
+            qs = urllib.parse.parse_qs(parsed_path.query)
+            cmd = qs.get('cmd', [''])[0].lower()
+            if cmd in ['ready', 'stop', 'abort', 'quit']:
+                global cmd_queue
+                cmd_queue.append(cmd)
+                print(f"[VISTA-WEB] Encolado comando: {cmd}")
+            self.send_response(200)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(b"OK")
+        elif parsed_path.path == '/video_feed':
+            self.send_response(200)
+            self.send_header('Content-type', 'multipart/x-mixed-replace; boundary=frame')
+            self.end_headers()
+            while True:
+                frame = getattr(self.server, 'latest_frame', None)
+                if frame is not None:
+                    _, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 95])
+                    try:
+                        self.wfile.write(b'--frame\r\n')
+                        self.send_header('Content-Type', 'image/jpeg')
+                        self.send_header('Content-Length', len(jpeg))
+                        self.end_headers()
+                        self.wfile.write(jpeg.tobytes())
+                        self.wfile.write(b'\r\n')
+                    except Exception:
+                        break
+                time.sleep(0.05)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+class ThreadingHTTPServer(socketserver.ThreadingMixIn, HTTPServer):
+    pass
+
+global_httpd = None
+
 import numpy as np
 
 try:  # como paquete
@@ -101,6 +150,16 @@ class Vista:
         self._proximo = 0.0
         self._tipografia = Tipografia(escala_para(alto_imagen))
         self._abierta = False
+        
+        global global_httpd
+        if global_httpd is None:
+            try:
+                global_httpd = ThreadingHTTPServer(('0.0.0.0', 8080), VideoStreamHandler)
+                t = threading.Thread(target=global_httpd.serve_forever, daemon=True)
+                t.start()
+                print("[VISTA] Servidor de Video MJPEG iniciado en puerto 8080")
+            except Exception as e:
+                print(f"[VISTA] Error iniciando servidor web: {e}")
         # Las zonas son lugares DECLARADOS: no cambian entre cuadros, así que se
         # arman una vez. El sistema de coordenadas sí cambia, y por eso lo que se
         # recalcula en cada cuadro es solo el paso de celdas a píxeles.
@@ -144,7 +203,18 @@ class Vista:
             self._dibujar_cubos(lienzo, sistema, estado)
 
         self._dibujar_panel(lienzo, estado, info)
+
+        # --- MEJORA DE CALIDAD (Nitidez y Contraste) ---
+        # 1. Unsharp mask para nitidez
+        gaussian = cv2.GaussianBlur(lienzo, (0, 0), 2.0)
+        lienzo = cv2.addWeighted(lienzo, 1.5, gaussian, -0.5, 0)
+        # 2. Ajuste sutil de brillo y contraste
+        lienzo = cv2.convertScaleAbs(lienzo, alpha=1.3, beta=50)
+
         cv2.imshow(self._titulo, lienzo)
+
+        if global_httpd is not None:
+            global_httpd.latest_frame = lienzo
         self._abierta = True
 
     # -- capas ------------------------------------------------------------
@@ -516,3 +586,13 @@ class Vista:
         if self._abierta:
             cv2.destroyWindow(self._titulo)
             self._abierta = False
+        
+        global global_httpd
+        if global_httpd is None:
+            try:
+                global_httpd = ThreadingHTTPServer(('0.0.0.0', 8080), VideoStreamHandler)
+                t = threading.Thread(target=global_httpd.serve_forever, daemon=True)
+                t.start()
+                print("[VISTA] Servidor de Video MJPEG iniciado en puerto 8080")
+            except Exception as e:
+                print(f"[VISTA] Error iniciando servidor web: {e}")

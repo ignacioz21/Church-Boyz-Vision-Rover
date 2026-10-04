@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+
+# Credenciales Wi-Fi de los rovers (ver rover_*/include/secrets.example.h)
+rover_*/include/secrets.h

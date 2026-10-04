@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Cerebro — Monitor de rovers</title>
+<style>
+  :root { --bg:#f4f5f7; --panel:#fff; --line:#d9dce1; --text:#1d2330; --muted:#6b7280;
+          --r10:#d97706; --r11:#7c3aed; --ok:#15803d; --bad:#b91c1c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; justify-content:space-between; align-items:center; padding:10px 16px;
+           background:var(--panel); border-bottom:1px solid var(--line); }
+  header h1 { margin:0; font-size:18px; }
+  #vision-state { font-weight:600; }
+  main { display:grid; grid-template-columns: minmax(0,1fr) 380px; gap:12px; padding:12px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
+  .panel h2 { margin:0 0 8px; font-size:14px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  /* Mapa y cámara lado a lado, del mismo tamaño y siempre dentro de la pantalla */
+  .views { display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:start;
+           --view: min(calc((100vw - 380px - 104px) / 2), calc(100vh - 120px)); }
+  .view { width:var(--view); height:var(--view); display:block; margin:0 auto;
+          background:#fafafa; border:1px solid var(--line); border-radius:6px; }
+  #video { height:auto; max-height:var(--view); object-fit:contain; background:#111; }
+  .rover { border-left:4px solid; padding:6px 10px; margin-bottom:10px; }
+  .rover[data-id="10"] { border-color:var(--r10); } .rover[data-id="11"] { border-color:var(--r11); }
+  .rover .row1 { display:flex; justify-content:space-between; font-weight:600; }
+  .rover .meta { color:var(--muted); font-family:ui-monospace, monospace; font-size:12px; margin:4px 0 6px; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  button { border:0; border-radius:5px; padding:6px 10px; margin:2px 0; font-weight:600; cursor:pointer; background:#374151; color:#fff; }
+  button.stop { background:var(--bad); }
+  button.wide { width:100%; padding:10px; margin-bottom:12px; }
+  #log { height:220px; overflow-y:auto; font:12px ui-monospace, monospace; background:#fafafa;
+         border:1px solid var(--line); border-radius:6px; padding:6px; }
+  .note { color:var(--muted); font-size:12px; }
+  @media (max-width: 1100px) {
+    main, .views { grid-template-columns: 1fr; }
+    .views { --view: min(calc(100vw - 50px), 70vh); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Cerebro — Monitor</h1>
+  <span>Visión: <span id="vision-state" class="bad">sin datos</span></span>
+</header>
+<main>
+  <section class="views">
+    <div class="panel">
+      <h2>Mapa</h2>
+      <canvas id="map" class="view" width="700" height="700"></canvas>
+    </div>
+    <div class="panel" id="video-panel">
+      <h2>Cámara</h2>
+      <img id="video" class="view" alt="" onerror="document.getElementById('video-panel').hidden=true">
+    </div>
+  </section>
+  <aside>
+    <div class="panel">
+      <button class="stop wide" onclick="send('*','r')">STOP TODOS</button>
+      <div id="rovers"></div>
+      <p class="note">Comandos solo para pruebas. Durante un intento ninguna PC puede comandar a los rovers (reglamento 6.3).</p>
+    </div>
+    <div class="panel" style="margin-top:12px">
+      <h2>Log</h2>
+      <div id="log"></div>
+    </div>
+  </aside>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+const COLORS = { red:'#dc2626', green:'#16a34a', blue:'#2563eb' };
+const ROVER_COLORS = { 10:'#d97706', 11:'#7c3aed' };
+const socket = io();
+const roverStatus = {};
+let lastWorld = 0;
+
+document.getElementById('video').src = `http://${location.hostname}:8080/video_feed`;
+
+function send(rover, cmd) { socket.emit('command', { rover, cmd }); }
+
+function log(tag, msg) {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.textContent = `${new Date().toLocaleTimeString()} [${tag}] ${msg}`;
+  el.appendChild(line);
+  while (el.childNodes.length > 300) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+
+// Las tarjetas se arman una vez; después solo se actualiza el texto (los
+// botones no se recrean, así un clic en STOP nunca se pierde).
+document.getElementById('rovers').innerHTML = [10, 11].map(id => `
+  <div class="rover" data-id="${id}">
+    <div class="row1"><span>Rover ${id}</span><span id="state-${id}" class="bad">OFFLINE</span></div>
+    <div class="meta" id="meta-${id}">sin reportes</div>
+    <button class="stop" onclick="send(${id},'r')">STOP</button>
+    <button onclick="send(${id},'S')" title="Corre la estrategia ya, sin esperar la fase">Iniciar práctica</button>
+    <button onclick="send(${id},'L')" title="Avanza ~20 cm y gira: mide latencia y velocidades">Calibrar</button>
+    <button onclick="send(${id},'f')">Adelante 1 s</button>
+    <button onclick="send(${id},'A')" title="Arco suave 2 s hacia la izquierda: prueba si el cubo se queda en las pinzas">Arco izq 2 s</button>
+    <button onclick="send(${id},'A,r')" title="Arco suave 2 s hacia la derecha">Arco der 2 s</button>
+  </div>`).join('');
+
+function renderRovers() {
+  const now = Date.now() / 1000;
+  for (const id of [10, 11]) {
+    const s = roverStatus[id];
+    const online = s && now - s.t < 1.5;
+    const st = document.getElementById(`state-${id}`);
+    st.textContent = online ? s.state : 'OFFLINE';
+    st.className = online ? 'ok' : 'bad';
+    if (!s) continue;
+    const yes = v => `<b class="${v ? 'ok' : 'bad'}">${v ? 'sí' : 'no'}</b>`;
+    document.getElementById(`meta-${id}`).innerHTML =
+      `${s.ip} · ${s.phase} · (${s.col.toFixed(1)}, ${s.row.toFixed(1)}) ${s.theta.toFixed(0)}° · seq ${s.seq}` +
+      `<br>enlace visión: ${yes(s.link)} · pose fresca: ${yes(s.fresh)}` +
+      `<br>plan ${s.plan || 'a bordo'} · cubo ${s.task ?? '-'} · objetivo (${(s.gc ?? 0).toFixed(1)}, ${(s.gr ?? 0).toFixed(1)})` +
+      `<br>latencia ${s.lat ?? '?'} ms · avance ${s.vg ?? '?'} · giro ${s.wg ?? '?'}`;
+  }
+}
+
+function drawWorld(w) {
+  const cv = document.getElementById('map'), ctx = cv.getContext('2d');
+  const s = cv.width / Math.max(w.grid.cols, w.grid.rows);
+  const X = c => c * s, Y = r => r * s;
+  ctx.clearRect(0, 0, cv.width, cv.height);
+
+  ctx.strokeStyle = '#e5e7eb';
+  for (let i = 0; i <= w.grid.cols; i += 5) { ctx.beginPath(); ctx.moveTo(X(i), 0); ctx.lineTo(X(i), Y(w.grid.rows)); ctx.stroke(); }
+  for (let i = 0; i <= w.grid.rows; i += 5) { ctx.beginPath(); ctx.moveTo(0, Y(i)); ctx.lineTo(X(w.grid.cols), Y(i)); ctx.stroke(); }
+
+  // Zonas: el lado largo apoya en el borde más cercano a su centro
+  const L = w.depot_size.length, D = w.depot_size.depth;
+  for (const d of w.depots) {
+    const toV = Math.min(d.col, w.grid.cols - d.col), toH = Math.min(d.row, w.grid.rows - d.row);
+    const [ww, hh] = toH < toV ? [L, D] : [D, L];
+    ctx.fillStyle = COLORS[d.color] + '22'; ctx.strokeStyle = COLORS[d.color];
+    ctx.fillRect(X(d.col - ww/2), Y(d.row - hh/2), ww*s, hh*s);
+    ctx.strokeRect(X(d.col - ww/2), Y(d.row - hh/2), ww*s, hh*s);
+  }
+
+  ctx.fillStyle = '#9ca3af';
+  ctx.beginPath(); ctx.arc(X(w.start.col), Y(w.start.row), 4, 0, 7); ctx.fill();
+
+  const half = w.cube_side / 2;
+  for (const c of w.cubes) {
+    ctx.globalAlpha = c.age_ms > 500 ? 0.4 : 1;
+    ctx.fillStyle = COLORS[c.color] || '#000';
+    ctx.fillRect(X(c.col - half), Y(c.row - half), w.cube_side*s, w.cube_side*s);
+  }
+  ctx.globalAlpha = 1;
+
+  for (const r of w.rovers) {
+    const a = -r.theta * Math.PI / 180;   // theta antihorario, row hacia abajo
+    ctx.strokeStyle = ctx.fillStyle = ROVER_COLORS[r.id] || '#111';
+    ctx.beginPath(); ctx.arc(X(r.col), Y(r.row), 3*s, 0, 7); ctx.globalAlpha = 0.25; ctx.fill();
+    ctx.globalAlpha = 1; ctx.lineWidth = 2; ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(X(r.col), Y(r.row));
+    ctx.lineTo(X(r.col + 4*Math.cos(a)), Y(r.row + 4*Math.sin(a))); ctx.stroke();
+    ctx.lineWidth = 1; ctx.fillText(r.id, X(r.col) + 3*s + 2, Y(r.row));
+  }
+}
+
+socket.on('connect', () => log('WEB', 'Conectado al cerebro'));
+socket.on('disconnect', () => log('WEB', 'Desconectado del cerebro'));
+socket.on('log', d => log(d.tag, d.msg));
+socket.on('world', w => {
+  lastWorld = Date.now();
+  const st = document.getElementById('vision-state');
+  st.textContent = `${w.phase} · seq ${w.seq}`; st.className = 'ok';
+  drawWorld(w);
+});
+// Se sella con el reloj del navegador: el del servidor puede no coincidir
+socket.on('rover_status', s => { roverStatus[s.id] = { ...s, t: Date.now() / 1000 }; });
+
+setInterval(() => {
+  renderRovers();
+  if (Date.now() - lastWorld > 1500) {
+    const st = document.getElementById('vision-state');
+    st.textContent = 'sin datos'; st.className = 'bad';
+  }
+}, 250);
+</script>
+</body>
+</html>
