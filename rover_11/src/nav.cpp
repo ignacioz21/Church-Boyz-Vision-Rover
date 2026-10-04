@@ -32,6 +32,7 @@ static const int DY[DIRS] = { 0, -1, -1, -1, 0, 1, 1, 1 };     // row crece haci
 
 static int NX = 0, NY = 0;
 static uint16_t clear_bits[MAX_NODES];      // bit b: libre con rumbo b * 22.5°
+static uint8_t repel[MAX_NODES];            // Costo extra por pasar cerca de algo (área de repelencia)
 static uint16_t g_cost[MAX_STATES];
 static uint16_t parent[MAX_STATES];
 static uint8_t closed[MAX_STATES / 8 + 1];
@@ -82,22 +83,57 @@ static inline int binOf(float heading) { return ((int)lroundf(heading / 22.5f) %
 static inline bool isClear(int node, int bin) { return clear_bits[node] & (1 << (bin & (BINS - 1))); }
 
 // --- Tabla "cabe / no cabe" ------------------------------------------------------
-struct Blob { Point p; float radius; };
+struct Blob { Point p; float radius; float repel_radius; float repel_gain; };
+
+static bool peer_leg_active = false;
+static Point peer_leg_from, peer_leg_to;
+
+void navSetPeerLeg(bool active, Point from, Point to) {
+    peer_leg_active = active;
+    peer_leg_from = from;
+    peer_leg_to = to;
+}
 
 static void buildTable(const TelemetrySnapshot &snap, CubeColor carried) {
     NX = min((int)(snap.grid_cols / STEP) + 1, MAX_N);
     NY = min((int)(snap.grid_rows / STEP) + 1, MAX_N);
 
-    Blob blobs[NUM_COLORS + 1];
+    static const int LEG_BLOBS = 6;
+    Blob blobs[NUM_COLORS + 1 + LEG_BLOBS];
     int n = 0;
     for (int c = 0; c < NUM_COLORS; c++) {
         Point p = { snap.cubes[c].col, snap.cubes[c].row };
-        if (c != carried && snap.cubes[c].detected && inField(p, snap))
-            blobs[n++] = { p, snap.cube_side * (float)M_SQRT2 / 2.0f + TABLE_CUBE_MARGIN };
+        if (c == carried || !snap.cubes[c].detected || !inField(p, snap)) continue;
+        // Un cubo ya entregado se cuida más: moverlo anula la entrega
+        bool delivered = cubeExcess(p, (CubeColor)c, snap) == 0.0f;
+        blobs[n++] = { p, snap.cube_side * (float)M_SQRT2 / 2.0f + TABLE_CUBE_MARGIN + (delivered ? 0.8f : 0.0f),
+                       REPEL_CUBE_RADIUS, delivered ? 28.0f : 16.0f };
     }
     if (snap.peer.detected) {
-        Point p = { snap.peer.col, snap.peer.row };
-        blobs[n++] = { p, TABLE_PEER_RADIUS };
+        blobs[n++] = { peerCenter(snap), TABLE_PEER_RADIUS, REPEL_PEER_RADIUS, 24.0f };
+        // El tramo que el compañero va a recorrer, como una fila de círculos
+        float leg = peer_leg_active ? dist(peer_leg_from, peer_leg_to) : 0.0f;
+        for (int i = 1; i <= LEG_BLOBS && leg > 3.0f; i++) {
+            float t = (float)i / LEG_BLOBS;
+            Point p = { peer_leg_from.col + (peer_leg_to.col - peer_leg_from.col) * t,
+                        peer_leg_from.row + (peer_leg_to.row - peer_leg_from.row) * t };
+            blobs[n++] = { p, TABLE_PEER_RADIUS, REPEL_PEER_RADIUS, 12.0f };
+        }
+    }
+
+    // Área de repelencia: costo extra (en octavos de celda) que crece al acercarse a
+    // un cubo, al compañero o a una línea. No prohíbe pasar: hace que la ruta se
+    // aleje cuando hay lugar y solo pase justo cuando no queda otra.
+    for (int node = 0; node < NX * NY; node++) {
+        Point a = pointOf(node);
+        float extra = 0.0f;
+        for (int i = 0; i < n; i++) {
+            float d = dist(a, blobs[i].p);
+            if (d < blobs[i].repel_radius) extra += blobs[i].repel_gain * (1.0f - d / blobs[i].repel_radius);
+        }
+        float to_line = min(min(a.col, snap.grid_cols - a.col), min(a.row, snap.grid_rows - a.row));
+        if (to_line < REPEL_LINE_DIST) extra += 14.0f * (1.0f - to_line / REPEL_LINE_DIST);
+        repel[node] = (uint8_t)min(extra, 250.0f);
     }
 
     const float tol = LINE_TOLERANCE - TABLE_LINE_MARGIN;
@@ -178,7 +214,8 @@ void navPrepare(const TelemetrySnapshot &snap, const Pose &from, CubeColor carri
         int s2 = start_node * DIRS + nd;
         if (s2 == start) continue;
         for (int turn = -1; turn <= 1; turn += 2) {
-            if (!pivotClear(from.p, from.theta, nd * 45.0f, turn, snap, carried)) continue;
+            // Con la holgura mínima: si acá el giro cabe justo, tiene que poder salir
+            if (!pivotClear(from.p, from.theta, nd * 45.0f, turn, snap, carried, PIVOT_TIGHT)) continue;
             int steps = ((nd - dirOf(from.theta)) * turn % DIRS + DIRS) % DIRS;
             uint16_t cost = steps * 2 * COST_PIVOT_BIN;
             if (cost < g_cost[s2]) {
@@ -207,12 +244,12 @@ void navPrepare(const TelemetrySnapshot &snap, const Pose &from, CubeColor carri
             if (!here_ok || !isClear(nb, 2 * d)) continue;
             uint16_t cost = (d % 2) ? COST_DIAGONAL : COST_STRAIGHT;
             if (sign < 0) cost = cost * COST_REVERSE_PCT / 100;
-            relax(s, nb * DIRS + d, cost);
+            relax(s, nb * DIRS + d, cost + repel[nb]);
         }
         for (int turn = -1; turn <= 1; turn += 2) {             // Pivotar 45°
             int nd = (d + turn + DIRS) % DIRS;
             if (!isClear(node, 2 * d) || !isClear(node, 2 * d + turn) || !isClear(node, 2 * nd)) continue;
-            relax(s, node * DIRS + nd, 2 * COST_PIVOT_BIN);
+            relax(s, node * DIRS + nd, 2 * COST_PIVOT_BIN + repel[node] / 2);
         }
     }
 }
@@ -248,6 +285,7 @@ void navReset() {
 }
 
 Point navWaypoint() { return leg_target; }
+bool navHasRoute() { return have_leg; }
 
 // Calcula la ruta y deja en leg_target / leg_reverse su PRIMER tramo recto, que es
 // el que se ejecuta ahora. false si no hay ruta, o si no hay que moverse (at_goal).

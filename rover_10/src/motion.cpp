@@ -152,11 +152,15 @@ bool motionTurnTo(const Pose &pose, float target_heading, float tol_deg,
             motionDrive(escape_dir * creep, escape_dir * creep);
             return false;
         }
-        // Encerrado: no se gira a la fuerza (las pinzas golpearían algo). Queda
-        // quieto; quien llama decide qué hacer si esto dura.
+        // No hay cómo hacer sitio. Si el giro cabe justo (holgura mínima), se hace;
+        // si no, no se gira a la fuerza: queda quieto y quien llama decide.
         escape_until_ms = 0;
-        motionDrive(0.0f, 0.0f);
-        return false;
+        if (pivotClear(pose.p, pose.theta, target_heading, shortest, snap, carried, PIVOT_TIGHT)) turn_dir = shortest;
+        else if (pivotClear(pose.p, pose.theta, target_heading, -shortest, snap, carried, PIVOT_TIGHT)) turn_dir = -shortest;
+        else {
+            motionDrive(0.0f, 0.0f);
+            return false;
+        }
     }
 
     float remaining = fmodf((target_heading - pose.theta) * turn_dir + 720.0f, 360.0f);

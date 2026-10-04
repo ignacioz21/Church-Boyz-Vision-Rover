@@ -42,7 +42,11 @@
 <body>
 <header>
   <h1>Cerebro — Monitor</h1>
-  <span>Visión: <span id="vision-state" class="bad">sin datos</span></span>
+  <span>
+    <button id="rec-btn" onclick="toggleRecord()">Grabar</button>
+    <span id="rec-state" class="note"></span>
+    &nbsp; Visión: <span id="vision-state" class="bad">sin datos</span>
+  </span>
 </header>
 <main>
   <section class="views">
@@ -117,7 +121,8 @@ function renderRovers() {
       `${s.ip} · ${s.phase} · (${s.col.toFixed(1)}, ${s.row.toFixed(1)}) ${s.theta.toFixed(0)}° · seq ${s.seq}` +
       `<br>enlace visión: ${yes(s.link)} · pose fresca: ${yes(s.fresh)}` +
       `<br>plan ${s.plan || 'a bordo'} · cubo ${s.task ?? '-'} · objetivo (${(s.gc ?? 0).toFixed(1)}, ${(s.gr ?? 0).toFixed(1)})` +
-      `<br>latencia ${s.lat ?? '?'} ms · avance ${s.vg ?? '?'} · giro ${s.wg ?? '?'}`;
+      `<br>latencia ${s.lat ?? '?'} ms · avance ${s.vg ?? '?'} · giro ${s.wg ?? '?'}` +
+      (s.st ? `<br>escucha al compañero: ${yes(s.peer)} · entregas ${s.st[0]} · aparta ${s.st[1]} · ayuda ${s.st[2]} · se corre ${s.st[3]} · incidentes ${s.st[4]}` : '');
   }
 }
 
@@ -166,6 +171,14 @@ function drawWorld(w) {
 socket.on('connect', () => log('WEB', 'Conectado al cerebro'));
 socket.on('disconnect', () => log('WEB', 'Desconectado del cerebro'));
 socket.on('log', d => log(d.tag, d.msg));
+// Registro de rondas: se graba solo durante una ronda; el botón graba a mano
+let recording = false;
+function toggleRecord() { socket.emit('record', { on: !recording }); }
+socket.on('recording', d => {
+  recording = d.on;
+  document.getElementById('rec-btn').textContent = d.on ? 'Detener grabación' : 'Grabar';
+  document.getElementById('rec-state').textContent = d.on ? `● grabando ${d.file}` : (d.file ? `guardado ${d.file}` : '');
+});
 socket.on('world', w => {
   lastWorld = Date.now();
   const st = document.getElementById('vision-state');

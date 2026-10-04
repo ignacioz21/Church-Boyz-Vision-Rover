@@ -19,6 +19,7 @@
 #define BRAIN_HOST              "192.168.88.11" // PC que corre el cerebro (monitor)
 #define BRAIN_STATUS_PORT       8888            // Rover -> cerebro: estado
 #define ROVER_CMD_PORT          8889            // Cerebro -> rover: comandos de prueba
+#define ROVER_PEER_PORT         8887            // Rover <-> rover: estado para coordinarse (reglamento 7.2-7.5)
 
 #define TELEMETRY_TIMEOUT_MS    500     // Pose más vieja que esto => no se avanza
 #define TELEMETRY_STALL_MS      1500    // Sin línea válida por este tiempo => reconectar
@@ -95,10 +96,19 @@
 // Tramo final de una entrega (recto hacia el centro de la zona): corrección máxima
 // de rumbo, como diferencia de potencia entre ruedas.
 #define CARRY_STEER_MAX         0.10f
+// Coordinación entre los dos rovers (coord.h)
+#define PEER_PUBLISH_MS         100     // Cada cuánto le cuento al compañero qué estoy haciendo
+#define PEER_TIMEOUT_MS         600     // Sin noticias por este tiempo => solo me guío por la cámara
+#define PEER_PATIENCE_MS        12000   // Cuánto espero a que el compañero despeje antes de buscar otra salida
 #define YIELD_DIST              17.0f   // Compañero más cerca que esto y en mi camino => cedo
 #define YIELD_MAX_MS            5000    // Tras esperar esto, se rodea
 #define RETREAT_DIST            7.0f    // Retroceso tras soltar el cubo
 #define PUSH_TIMEOUT_MS         25000
-#define MAX_ATTEMPTS            3       // Reintentos por cubo antes de pasar al siguiente
+#define MAX_ATTEMPTS            5       // Intentos por cubo (cada uno prueba una forma distinta de tomarlo)
+#define NO_PROGRESS_MS          20000   // Sin avanzar este tiempo => se descarta lo que estaba intentando
+// Área de repelencia: las rutas prefieren pasar lejos de esto cuando hay lugar
+#define REPEL_CUBE_RADIUS       11.0f   // Alrededor de un cubo
+#define REPEL_PEER_RADIUS       15.0f   // Alrededor del compañero
+#define REPEL_LINE_DIST         6.0f    // Franja junto a las líneas de la cancha
 
 #endif // ROVER_CONFIG_H

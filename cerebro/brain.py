@@ -1,10 +1,12 @@
-"""Cerebro (PC) — monitor y banco de pruebas de los rovers.
+"""Cerebro (PC) — monitor, registro y banco de pruebas de los rovers.
 
 No toma decisiones de competencia: eso vive en el firmware (reglamento 6.3).
-Hace tres cosas:
   1. Lee la visión (TCP 2026) y muestra el mundo en el dashboard.
   2. Recibe el estado que publica cada rover (UDP BRAIN_STATUS_PORT).
-  3. Envía comandos de PRUEBA a los rovers (UDP ROVER_CMD_PORT) desde el dashboard.
+  3. Graba cada ronda y vigila que los rovers reporten y avancen (recorder.py).
+  4. Envía comandos de PRUEBA a los rovers (UDP ROVER_CMD_PORT) desde el dashboard.
+
+Los puntos 1 a 3 solo observan: pueden quedar encendidos durante un intento.
 
 Uso:  vision-system/.venv/bin/python cerebro/brain.py   ->  http://localhost:8891
 """
@@ -17,6 +19,8 @@ import time
 
 from flask import Flask, send_from_directory
 from flask_socketio import SocketIO
+
+from recorder import Recorder
 
 VISION_HOST = "127.0.0.1"
 VISION_PORT = 2026
@@ -37,6 +41,20 @@ cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 def log(tag, msg):
     print(f"[{tag}] {msg}")
     socketio.emit("log", {"tag": tag, "msg": msg})
+
+
+recorder = Recorder(
+    os.path.join(HERE, "registros"),
+    on_alert=lambda rover, what: log("ALERTA", f"Rover {rover}: {what}"),
+    on_status=lambda on, name: socketio.emit("recording", {"on": on, "file": name}),
+)
+
+
+@socketio.on("record")
+def on_record(data):
+    """Grabar a mano (pruebas fuera de una ronda). data = {"on": true | false}"""
+    recorder.set_forced(bool(data.get("on")))
+    log("REG", f"Grabación manual {'iniciada: ' + recorder.name if data.get('on') else 'detenida'}")
 
 
 @app.route("/")
@@ -77,6 +95,7 @@ def vision_loop():
                     if msg.get("v") != 2:
                         continue
                     last_emit = time.time()
+                    recorder.world(msg)
                     socketio.emit("world", msg)
         except (OSError, ConnectionError, ValueError) as e:
             log("VISION", f"Sin visión ({e}). Reintentando...")
@@ -96,12 +115,20 @@ def status_loop():
             continue
         status["ip"] = addr[0]
         status["t"] = time.time()
+        recorder.rover(status)
         socketio.emit("rover_status", status)
+
+
+def watchdog_loop():
+    while True:
+        time.sleep(1.0)
+        recorder.watchdog()
 
 
 if __name__ == "__main__":
     threading.Thread(target=vision_loop, daemon=True).start()
     threading.Thread(target=status_loop, daemon=True).start()
+    threading.Thread(target=watchdog_loop, daemon=True).start()
     print(f"[WEB] Dashboard en http://0.0.0.0:{WEB_PORT}")
     socketio.run(app, host="0.0.0.0", port=WEB_PORT, debug=False,
                  use_reloader=False, allow_unsafe_werkzeug=True)

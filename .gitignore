@@ -3,3 +3,9 @@ __pycache__/
 
 # Credenciales Wi-Fi de los rovers (ver rover_*/include/secrets.example.h)
 rover_*/include/secrets.h
+
+# Salida del simulador
+sim/resultados.jsonl
+
+# Rondas grabadas por el cerebro
+cerebro/registros/

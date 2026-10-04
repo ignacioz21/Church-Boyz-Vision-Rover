@@ -16,6 +16,7 @@
 #include "include/motion.h"
 #include "include/plan.h"
 #include "include/strategy.h"
+#include "include/coord.h"
 
 #define LOOP_PERIOD_MS      20      // ~50 Hz
 #define STATUS_PERIOD_MS    200     // Estado al cerebro
@@ -101,16 +102,22 @@ static void sendStatus(const TelemetrySnapshot &snap, bool fresh, const char* st
     CubeColor target = strategy_running ? strategyTarget() : COLOR_UNKNOWN;
     Point goal = goto_active ? goto_target : strategyGoal();
     const MotionCal &cal = motionCal();
-    char line[360];
+    const StrategyStats &k = strategyStats();
+    // "st": entregas, apartados, ayudas, veces que se corrió, e incidentes (todo lo que salió mal)
+    int incidents = k.no_progress + k.nav_fail + k.aim_timeout + k.capture_timeout + k.no_drop_route +
+                    k.carry_fail + k.cube_lost + k.drop_blocked + k.verify_fail;
+    char line[440];
     snprintf(line, sizeof(line),
              "{\"id\":%d,\"state\":\"%s\",\"fresh\":%s,\"link\":%s,\"phase\":\"%s\","
              "\"col\":%.2f,\"row\":%.2f,\"theta\":%.1f,\"seq\":%u,"
              "\"plan\":%d,\"task\":\"%c\",\"gc\":%.1f,\"gr\":%.1f,"
-             "\"lat\":%.0f,\"vg\":%.1f,\"wg\":%.0f}",
+             "\"lat\":%.0f,\"vg\":%.1f,\"wg\":%.0f,"
+             "\"peer\":%s,\"st\":[%d,%d,%d,%d,%d]}",
              ROVER_ID, state, fresh ? "true" : "false", snap.is_connected ? "true" : "false",
              phaseName(snap.phase), snap.me.col, snap.me.row, snap.me.theta, (unsigned)snap.seq,
              planLoadedId(), target == COLOR_UNKNOWN ? '-' : COLOR_CHAR[target], goal.col, goal.row,
-             cal.latency_ms, cal.speed_gain, cal.turn_gain);
+             cal.latency_ms, cal.speed_gain, cal.turn_gain,
+             coordPeer().heard ? "true" : "false", k.deliveries, k.parks, k.helps, k.clears, incidents);
     commsSend(line);
 }
 

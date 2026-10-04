@@ -46,3 +46,38 @@ void commsSend(const char *line) {
     udp.write((const uint8_t*)line, strlen(line));
     udp.endPacket();
 }
+
+// --- Canal entre rovers ---------------------------------------------------------------
+static WiFiUDP peer_udp;
+static bool peer_started = false;
+
+static bool ensurePeerStarted() {
+    if (WiFi.status() != WL_CONNECTED) {
+        peer_started = false;
+        return false;
+    }
+    if (!peer_started) peer_started = peer_udp.begin(ROVER_PEER_PORT);
+    return peer_started;
+}
+
+void commsPeerSend(const char *line) {
+    if (!ensurePeerStarted()) return;
+    peer_udp.beginPacket(WiFi.broadcastIP(), ROVER_PEER_PORT);
+    peer_udp.write((const uint8_t*)line, strlen(line));
+    peer_udp.endPacket();
+}
+
+bool commsPeerPoll(String &line) {
+    if (!ensurePeerStarted()) return false;
+    // Se vacía la cola y se devuelve lo último: un estado viejo no sirve
+    bool got = false;
+    while (peer_udp.parsePacket() > 0) {
+        char buf[128];
+        int len = peer_udp.read(buf, sizeof(buf) - 1);
+        if (len <= 0) continue;
+        buf[len] = '\0';
+        line = String(buf);
+        got = true;
+    }
+    return got;
+}

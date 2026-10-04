@@ -1,4 +1,4 @@
-# Cerebro — monitor y pruebas
+# Cerebro — monitor, registro y pruebas
 
 Muestra en el navegador lo que publica la visión y lo que reporta cada rover, y
 permite mandar comandos de **prueba**. No decide nada de la competencia: según el
@@ -7,6 +7,21 @@ reglamento (6.3, 11.2) eso corre a bordo, en `rover_*/src/strategy.cpp`.
 ```
 vision-system/.venv/bin/python cerebro/brain.py     # -> http://localhost:8891
 ```
+
+## Registro de rondas
+
+`recorder.py` graba cada ronda en `registros/ronda_AAAAMMDD_HHMMSS.jsonl` (una línea
+JSON por dato): el mundo según la visión 5 veces por segundo, lo que reporta cada
+rover, los eventos (cambio de fase, cubo que entra o sale de su zona), los avisos del
+vigilante y un resumen al cerrar. Empieza solo cuando la visión pasa a `READY` y
+termina en `FINISHED` o `IDLE`; el botón **Grabar** del dashboard graba a mano.
+
+El vigilante avisa (en el log del dashboard y en el archivo) cuando un rover deja de
+reportar, pierde la telemetría o pasa 15 s sin avanzar en un estado en que debería
+moverse. Solo observa: no le manda nada a los rovers.
+
+`planner.py` es el planificador (reparto y orden de los cubos). Hoy lo usa el
+simulador; falta que `brain.py` lo calcule en IDLE y cargue el plan en los rovers.
 
 ## Protocolo con los rovers (UDP)
 

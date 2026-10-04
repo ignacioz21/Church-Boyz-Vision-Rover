@@ -24,6 +24,14 @@ Point approachPoint(Point cube, Point depot, float d);
 // punto de desvío por el lado más corto.
 bool detourAround(Point a, Point b, Point obstacle, float radius, Point &via);
 
+// Distancia de un punto al segmento a-b
+float pointToSegment(Point p, Point a, Point b);
+
+// El compañero como obstáculo: un círculo que contiene su cuerpo Y sus pinzas,
+// centrado un poco por delante de su marcador.
+Point peerCenter(const TelemetrySnapshot &snap);
+#define PEER_BODY_RADIUS 6.3f
+
 // --- Huella real del robot (cuerpo + pinzas) --------------------------------
 // 'axle' es el eje de las ruedas y 'theta' el rumbo. Las medidas salen de config.h.
 
@@ -42,8 +50,11 @@ bool poseClear(Point axle, float theta, const TelemetrySnapshot &snap, CubeColor
 
 // ¿Se puede pivotar de theta_from a theta_to en ese sentido (+1 antihorario,
 // -1 horario) sin que la huella toque nada ni salga de las líneas?
-// Se comprueba con holgura en las líneas: un pivote real nunca sale exacto.
+// Se comprueba con holgura en las líneas ('line_margin'): un pivote real nunca sale
+// exacto. PIVOT_TIGHT es lo mínimo, para cuando no hay forma de hacer sitio antes.
+#define PIVOT_LINE_MARGIN 0.5f
+#define PIVOT_TIGHT       0.1f
 bool pivotClear(Point axle, float theta_from, float theta_to, int dir,
-                const TelemetrySnapshot &snap, CubeColor skip);
+                const TelemetrySnapshot &snap, CubeColor skip, float line_margin = PIVOT_LINE_MARGIN);
 
 #endif // ROVER_GEOMETRY_H

@@ -37,8 +37,16 @@ float navCost(Point goal, int dir);
 // replanifica sola al terminar cada tramo o si algo se cruza.
 NavStatus navGo(const Pose &pose, Point goal, int dir, const TelemetrySnapshot &snap, CubeColor carried);
 
+// Tramo que el compañero está recorriendo ahora (de 'from' a 'to'). Mientras esté
+// activo, las rutas lo evitan entero y no solo su posición actual. Lo usa el rover
+// que NO tiene prioridad.
+void navSetPeerLeg(bool active, Point from, Point to);
+
 // Punto al que se dirige ahora (para el monitor y para ceder el paso)
 Point navWaypoint();
+
+// ¿Tiene una ruta en curso? (false mientras busca una y no la encuentra)
+bool navHasRoute();
 
 void navReset();
 

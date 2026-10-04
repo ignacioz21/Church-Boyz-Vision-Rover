@@ -85,6 +85,22 @@ bool detourAround(Point a, Point b, Point obstacle, float radius, Point &via) {
     return true;
 }
 
+float pointToSegment(Point p, Point a, Point b) {
+    float seg2 = (b.col - a.col) * (b.col - a.col) + (b.row - a.row) * (b.row - a.row);
+    float t = seg2 < 1e-6f ? 0.0f
+            : ((p.col - a.col) * (b.col - a.col) + (p.row - a.row) * (b.row - a.row)) / seg2;
+    t = constrain(t, 0.0f, 1.0f);
+    Point c = { a.col + (b.col - a.col) * t, a.row + (b.row - a.row) * t };
+    return dist(p, c);
+}
+
+Point peerCenter(const TelemetrySnapshot &snap) {
+    // De la cola a la punta de las pinzas, visto desde el marcador
+    float front = FP_PRONG_TIP - AXLE_OFFSET, rear = FP_REAR + AXLE_OFFSET;
+    Point marker = { snap.peer.col, snap.peer.row };
+    return advance(marker, snap.peer.theta, (front - rear) / 2.0f);
+}
+
 // --- Huella real del robot ----------------------------------------------------
 
 // Punto del robot (x hacia el frente, y hacia un costado, desde el eje) -> cancha.
@@ -135,23 +151,17 @@ bool poseClear(Point axle, float theta, const TelemetrySnapshot &snap, CubeColor
         if (c == skip || !snap.cubes[c].detected || !inField(cube, snap)) continue;
         if (footprintHits(axle, theta, cube, cube_radius)) return false;
     }
-    if (snap.peer.detected) {
-        // El compañero como un círculo que contiene su cuerpo (sin contar sus pinzas)
-        Point peer = { snap.peer.col, snap.peer.row };
-        if (footprintHits(axle, theta, peer, 5.0f)) return false;
-    }
+    if (snap.peer.detected && footprintHits(axle, theta, peerCenter(snap), PEER_BODY_RADIUS)) return false;
     return true;
 }
 
-static const float PIVOT_LINE_MARGIN = 0.15f;
-
 bool pivotClear(Point axle, float theta_from, float theta_to, int dir,
-                const TelemetrySnapshot &snap, CubeColor skip) {
+                const TelemetrySnapshot &snap, CubeColor skip, float line_margin) {
     // Ángulo a recorrer en ese sentido, en [0, 360)
     float sweep = fmodf((theta_to - theta_from) * dir + 720.0f, 360.0f);
     // Se empieza un paso más allá: la pose actual es la que es, lo que se decide es el giro
     for (float a = 10.0f; a < sweep; a += 10.0f) {
-        if (!poseClear(axle, theta_from + dir * a, snap, skip, 0.4f, PIVOT_LINE_MARGIN)) return false;
+        if (!poseClear(axle, theta_from + dir * a, snap, skip, 0.4f, line_margin)) return false;
     }
-    return poseClear(axle, theta_to, snap, skip, 0.4f, PIVOT_LINE_MARGIN);
+    return poseClear(axle, theta_to, snap, skip, 0.4f, line_margin);
 }
