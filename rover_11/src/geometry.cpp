@@ -111,8 +111,42 @@ static Point bodyPoint(Point axle, float theta, float x, float y) {
     return p;
 }
 
+// Dónde está el robot AHORA (lo fija la estrategia en cada ciclo)
+static Point self_axle;
+static float self_theta = 0.0f;
+static bool self_known = false;
+
+void geometrySetSelf(Point axle, float theta) {
+    self_axle = axle;
+    self_theta = theta;
+    self_known = true;
+}
+
+static const float FOOT_CORNERS[][2] = {
+    { -FP_REAR, FP_HALF_WIDTH }, { -FP_REAR, -FP_HALF_WIDTH },
+    { FP_FRONT, FP_HALF_WIDTH }, { FP_FRONT, -FP_HALF_WIDTH },
+    { FP_PRONG_TIP, FP_PRONG_SIDE }, { FP_PRONG_TIP, -FP_PRONG_SIDE },
+};
+
+// Cuánto sobresale la huella de las líneas (0 si está toda adentro)
+static float lineExcess(Point axle, float theta, const TelemetrySnapshot &snap) {
+    float worst = 0.0f;
+    for (const auto &k : FOOT_CORNERS) {
+        Point p = bodyPoint(axle, theta, k[0], k[1]);
+        worst = fmaxf(worst, fmaxf(fmaxf(-p.col, p.col - snap.grid_cols), fmaxf(-p.row, p.row - snap.grid_rows)));
+    }
+    return worst;
+}
+
 bool footprintInField(Point axle, float theta, const TelemetrySnapshot &snap, float line_margin) {
-    const float tol = LINE_TOLERANCE - line_margin;
+    float tol = LINE_TOLERANCE - line_margin;
+    // Si YA estoy más afuera que lo permitido (me colocaron muy atrás en la salida),
+    // exigir la tolerancia me dejaría sin ningún movimiento válido. Vale lo que hay
+    // ahora: se puede ir a cualquier lado que no me saque más.
+    if (self_known) {
+        float now = lineExcess(self_axle, self_theta, snap);
+        if (now > tol) tol = now + 0.05f;
+    }
     // Basta con las esquinas: cola, frente del chasis y puntas de las pinzas
     static const float CORNERS[][2] = {
         { -FP_REAR, FP_HALF_WIDTH }, { -FP_REAR, -FP_HALF_WIDTH },
@@ -126,7 +160,7 @@ bool footprintInField(Point axle, float theta, const TelemetrySnapshot &snap, fl
     return true;
 }
 
-bool footprintHits(Point axle, float theta, Point obj, float radius) {
+float footprintDistance(Point axle, float theta, Point obj) {
     // El objeto en el marco del robot
     float c = cosf(theta / DEG), s = sinf(theta / DEG);
     float dx = obj.col - axle.col, dy = obj.row - axle.row;
@@ -135,10 +169,71 @@ bool footprintHits(Point axle, float theta, Point obj, float radius) {
 
     // Distancia al rectángulo del cuerpo
     float bx = constrain(x, -FP_REAR, FP_FRONT), by = constrain(y, -FP_HALF_WIDTH, FP_HALF_WIDTH);
-    if (hypotf(x - bx, y - by) < radius) return true;
+    float body = hypotf(x - bx, y - by);
     // Distancia a la pinza de ese lado (un segmento)
     float px = constrain(x, FP_FRONT, FP_PRONG_TIP), py = y > 0 ? FP_PRONG_SIDE : -FP_PRONG_SIDE;
-    return hypotf(x - px, y - py) < radius;
+    return fminf(body, hypotf(x - px, y - py));
+}
+
+bool footprintHits(Point axle, float theta, Point obj, float radius) {
+    return footprintDistance(axle, theta, obj) < radius;
+}
+
+// --- Compañero quieto: su forma real -----------------------------------------------
+static bool peer_still = false;
+void geometrySetPeerStill(bool still) { peer_still = still; }
+bool geometryPeerStill() { return peer_still; }
+
+// Puntos del contorno del robot (x al frente, y a un costado, desde el eje)
+static const float OUTLINE[12][2] = {
+    { -FP_REAR, FP_HALF_WIDTH }, { -FP_REAR, -FP_HALF_WIDTH }, { -FP_REAR, 0.0f },
+    { FP_FRONT, FP_HALF_WIDTH }, { FP_FRONT, -FP_HALF_WIDTH }, { FP_FRONT, 0.0f },
+    { (FP_FRONT - FP_REAR) / 2.0f, FP_HALF_WIDTH }, { (FP_FRONT - FP_REAR) / 2.0f, -FP_HALF_WIDTH },
+    { FP_PRONG_TIP, FP_PRONG_SIDE }, { FP_PRONG_TIP, -FP_PRONG_SIDE },
+    { (FP_FRONT + FP_PRONG_TIP) / 2.0f, FP_PRONG_SIDE }, { (FP_FRONT + FP_PRONG_TIP) / 2.0f, -FP_PRONG_SIDE },
+};
+
+// Distancia de un punto (en el marco del robot) a la huella
+static inline float localDistance(float x, float y) {
+    float bx = constrain(x, -FP_REAR, FP_FRONT), by = constrain(y, -FP_HALF_WIDTH, FP_HALF_WIDTH);
+    float px = constrain(x, FP_FRONT, FP_PRONG_TIP), py = y > 0 ? FP_PRONG_SIDE : -FP_PRONG_SIDE;
+    return fminf(hypotf(x - bx, y - by), hypotf(x - px, y - py));
+}
+
+void peerShape(const TelemetrySnapshot &snap, PeerShape &out) {
+    Point marker = { snap.peer.col, snap.peer.row };
+    out.axle = advance(marker, snap.peer.theta, -AXLE_OFFSET);
+    out.c = cosf(snap.peer.theta / DEG);
+    out.s = sinf(snap.peer.theta / DEG);
+    for (int i = 0; i < 12; i++) {
+        out.pts[i].col = out.axle.col + OUTLINE[i][0] * out.c + OUTLINE[i][1] * out.s;
+        out.pts[i].row = out.axle.row - OUTLINE[i][0] * out.s + OUTLINE[i][1] * out.c;
+    }
+}
+
+bool peerShapeHits(const PeerShape &peer, Point axle, float c, float s, float margin) {
+    // Lejos: ni mirar (cada robot cabe en un círculo de radio ~8.4 desde su eje)
+    if (hypotf(peer.axle.col - axle.col, peer.axle.row - axle.row) > 17.0f + margin) return false;
+    for (int i = 0; i < 12; i++) {
+        // Su contorno contra mi huella
+        float dx = peer.pts[i].col - axle.col, dy = peer.pts[i].row - axle.row;
+        if (localDistance(dx * c - dy * s, dx * s + dy * c) < margin) return true;
+        // Mi contorno contra su huella
+        float mc = axle.col + OUTLINE[i][0] * c + OUTLINE[i][1] * s, mr = axle.row - OUTLINE[i][0] * s + OUTLINE[i][1] * c;
+        dx = mc - peer.axle.col; dy = mr - peer.axle.row;
+        if (localDistance(dx * peer.c - dy * peer.s, dx * peer.s + dy * peer.c) < margin) return true;
+    }
+    return false;
+}
+
+// Distancia que hay que guardar con el compañero. Lo normal es PEER_BODY_RADIUS; pero
+// si YA estoy más cerca que eso (la salida, con los dos rovers lado a lado), exigirla
+// me dejaría sin ningún movimiento permitido. Entonces vale lo que hay ahora: se puede
+// ir a cualquier lado que no me acerque más.
+static float peerKeepOut(const TelemetrySnapshot &snap) {
+    if (!self_known) return PEER_BODY_RADIUS;
+    float now = footprintDistance(self_axle, self_theta, peerCenter(snap));
+    return now < PEER_BODY_RADIUS ? fmaxf(now - 0.2f, PEER_TOUCH_RADIUS) : PEER_BODY_RADIUS;
 }
 
 bool poseClear(Point axle, float theta, const TelemetrySnapshot &snap, CubeColor skip,
@@ -151,7 +246,15 @@ bool poseClear(Point axle, float theta, const TelemetrySnapshot &snap, CubeColor
         if (c == skip || !snap.cubes[c].detected || !inField(cube, snap)) continue;
         if (footprintHits(axle, theta, cube, cube_radius)) return false;
     }
-    if (snap.peer.detected && footprintHits(axle, theta, peerCenter(snap), PEER_BODY_RADIUS)) return false;
+    if (snap.peer.detected) {
+        if (peer_still) {
+            PeerShape shape;
+            peerShape(snap, shape);
+            if (peerShapeHits(shape, axle, cosf(theta / DEG), sinf(theta / DEG), PEER_STILL_MARGIN)) return false;
+        } else if (footprintHits(axle, theta, peerCenter(snap), peerKeepOut(snap))) {
+            return false;
+        }
+    }
     return true;
 }
 

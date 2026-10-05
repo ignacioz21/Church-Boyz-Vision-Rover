@@ -32,6 +32,9 @@ void stopMotors() { cmd_left = cmd_right = 0.0f; }
 float readUltrasonicCm() { return 999.0f; }
 void readFloorSensors(int &a, int &b, int &c, int &d) { a = b = c = d = 0; }
 void setLedColor(uint8_t, uint8_t, uint8_t) {}
+bool imuReady() { return false; }       // El simulador no modela el giroscopio
+float gyroZDps() { return 0.0f; }
+void gyroRezero() {}
 
 void telemetryInit() {}
 bool telemetryGetSnapshot(TelemetrySnapshot &out) { out = current; return current.is_valid; }

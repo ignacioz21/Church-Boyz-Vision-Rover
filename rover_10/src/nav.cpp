@@ -109,8 +109,12 @@ static void buildTable(const TelemetrySnapshot &snap, CubeColor carried) {
         blobs[n++] = { p, snap.cube_side * (float)M_SQRT2 / 2.0f + TABLE_CUBE_MARGIN + (delivered ? 0.8f : 0.0f),
                        REPEL_CUBE_RADIUS, delivered ? 28.0f : 16.0f };
     }
+    // Compañero quieto: cuenta su forma real (más abajo), no el círculo grande
+    bool still = snap.peer.detected && geometryPeerStill();
+    PeerShape shape;
+    if (still) peerShape(snap, shape);
     if (snap.peer.detected) {
-        blobs[n++] = { peerCenter(snap), TABLE_PEER_RADIUS, REPEL_PEER_RADIUS, 24.0f };
+        blobs[n++] = { peerCenter(snap), still ? 0.0f : TABLE_PEER_RADIUS, REPEL_PEER_RADIUS, 24.0f };
         // El tramo que el compañero va a recorrer, como una fila de círculos
         float leg = peer_leg_active ? dist(peer_leg_from, peer_leg_to) : 0.0f;
         for (int i = 1; i <= LEG_BLOBS && leg > 3.0f; i++) {
@@ -163,6 +167,7 @@ static void buildTable(const TelemetrySnapshot &snap, CubeColor carried) {
                 float r = blobs[i].radius;
                 if (hypotf(x - bx, y - by) < r || hypotf(x - px, y - py) < r) ok = false;
             }
+            if (ok && still && peerShapeHits(shape, a, c, s, PEER_STILL_MARGIN + 0.5f)) ok = false;
             if (ok) clear_bits[node] |= (1 << bin);
         }
     }
@@ -278,8 +283,20 @@ static int planned_dir = -1;
 static uint32_t blocked_since_ms = 0;
 static int failed_plans = 0;
 
+// Esquinas de la última ruta calculada (solo para mostrarla en el monitor)
+static const int ROUTE_MAX = 12;
+static Point route_pts[ROUTE_MAX];
+static int route_n = 0;
+
+int navRoute(Point *out, int max) {
+    int n = have_leg ? min(route_n, max) : 0;
+    for (int i = 0; i < n; i++) out[i] = route_pts[i];
+    return n;
+}
+
 void navReset() {
     have_leg = false;
+    route_n = 0;
     blocked_since_ms = 0;
     failed_plans = 0;
 }
@@ -306,6 +323,20 @@ static bool planLeg(const Pose &pose, Point goal, int goal_dir, const TelemetryS
         if (skip > 0) { skip--; continue; }
         tail[n++] = (uint16_t)s;
     }
+    // Para el monitor: los puntos donde la ruta cambia de dirección, y el último
+    route_n = 0;
+    int prev_node = tail[n - 1] / DIRS, step_x = 0, step_y = 0;
+    for (int i = n - 2; i >= 0; i--) {
+        int node = tail[i] / DIRS;
+        if (node == prev_node) continue;                    // Pivote: mismo punto
+        int sx = node % NX - prev_node % NX, sy = node / NX - prev_node / NX;
+        if ((sx != step_x || sy != step_y) && (step_x != 0 || step_y != 0) && route_n < ROUTE_MAX - 1)
+            route_pts[route_n++] = pointOf(prev_node);
+        step_x = sx; step_y = sy;
+        prev_node = node;
+    }
+    if (n > 1) route_pts[route_n++] = pointOf(prev_node);
+
     // tail[n-1] es el estado inicial; se avanza hacia tail[0]
     int end_node = -1, leg_dir = -1;
     bool reverse = false;
@@ -330,6 +361,15 @@ static bool planLeg(const Pose &pose, Point goal, int goal_dir, const TelemetryS
 
 NavStatus navGo(const Pose &pose, Point goal, int goal_dir, const TelemetrySnapshot &snap, CubeColor carried) {
     bool goal_changed = dist(goal, planned_goal) > 1.0f || goal_dir != planned_dir;
+    // Con un cubo y ya sobre el destino: no se persigue un punto que queda casi debajo del eje
+    // (al pivotar el eje se corre un poco, y el robot daría vueltas tras él). El rumbo
+    // final lo corrige quien llama, que después apunta.
+    if (carried != COLOR_UNKNOWN && dist(pose.p, goal) < NAV_ARRIVE_DIST) {
+        motionStop();
+        have_leg = false;
+        failed_plans = 0;
+        return NAV_ARRIVED;
+    }
     if (!have_leg || goal_changed) {
         motionStop();
         planned_goal = goal;

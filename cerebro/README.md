@@ -33,5 +33,13 @@ simulador; falta que `brain.py` lo calcule en IDLE y cargue el plan en los rover
 Comandos de prueba: `r` para, `f` avanza 1 s, `M,izq,der` potencia directa
 (caduca a los 500 ms si no se renueva).
 
+**Bloqueo de ronda (reglamento 6.3, 9.5, 11.2).** Desde que la visión pasa a `READY` y
+hasta que termina la ronda, el cerebro no transmite ningún comando (los botones quedan
+sin efecto y el log dice `BLOQUEADO`) y los rovers descartan cualquier comando que les
+llegue, incluido el STOP. Los botones sirven solo con la visión en `IDLE` o `FINISHED`.
+El cerebro sigue escuchando y grabando, que es solo observar. Si los jueces no aceptan
+ni eso, `STATUS_DURING_ROUND 0` en `config.h` hace que los rovers no reporten nada
+durante la ronda.
+
 Las IP y los puertos se configuran en `rover_*/include/config.h` y al inicio de
 `brain.py`; tienen que coincidir.

@@ -18,6 +18,10 @@
 #include "include/strategy.h"
 #include "include/coord.h"
 
+// La planificación anida varias funciones y además reporta por la red desde adentro:
+// con la pila por defecto (8 KB) queda muy justo. Una pila desbordada reinicia la placa.
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);
+
 #define LOOP_PERIOD_MS      20      // ~50 Hz
 #define STATUS_PERIOD_MS    200     // Estado al cerebro
 #define TEST_CMD_TIMEOUT_MS 500     // Un "M" de prueba caduca si no se renueva
@@ -31,6 +35,31 @@ static Point goto_target;
 static uint32_t goto_since_ms = 0;
 
 static bool strategy_running = false;
+
+// Por qué arrancó la placa: si se reinicia en plena ronda, esto dice si fue un bajón
+// de voltaje (motores) o un fallo del programa. Se reporta al cerebro en "rst".
+// Miga de pan: en qué parte del programa estaba la placa. Vive en una memoria que
+// sobrevive a un reinicio por cuelgue o fallo, así el arranque siguiente puede decir
+// dónde se quedó (sin necesidad de tener el cable conectado).
+RTC_NOINIT_ATTR static uint32_t crumb_magic;
+RTC_NOINIT_ATTR static uint32_t crumb_now;
+static uint32_t crumb_previous = 0;         // Lo que dejó el arranque anterior (0 = nada)
+#define CRUMB_MAGIC 0xC0FFEE10u
+static inline void crumb(uint32_t where) { crumb_now = where; }
+
+static const char* resetName() {
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:  return "encendido";
+        case ESP_RST_SW:       return "reinicio";
+        case ESP_RST_PANIC:    return "fallo";
+        case ESP_RST_INT_WDT:  return "colgado-int";       // Interrupciones bloqueadas
+        case ESP_RST_TASK_WDT: return "colgado-tarea";     // Una tarea no soltó el procesador
+        case ESP_RST_WDT:      return "colgado";
+        case ESP_RST_BROWNOUT: return "voltaje";
+        case ESP_RST_EXT:      return "boton";
+        default:               return "otro";
+    }
+}
 
 static const char* phaseName(CompetitionPhase p) {
     switch (p) {
@@ -106,44 +135,90 @@ static void sendStatus(const TelemetrySnapshot &snap, bool fresh, const char* st
     // "st": entregas, apartados, ayudas, veces que se corrió, e incidentes (todo lo que salió mal)
     int incidents = k.no_progress + k.nav_fail + k.aim_timeout + k.capture_timeout + k.no_drop_route +
                     k.carry_fail + k.cube_lost + k.drop_blocked + k.verify_fail;
-    char line[440];
+    // "route": lo que piensa recorrer (solo mientras corre la estrategia)
+    Point route[12];
+    int route_n = strategy_running ? strategyRoute(route, 12) : 0;
+    char route_txt[200] = "";
+    int used = 0;
+    for (int i = 0; i < route_n && used < (int)sizeof(route_txt) - 16; i++) {
+        used += snprintf(route_txt + used, sizeof(route_txt) - used, "%s[%.1f,%.1f]", i ? "," : "", route[i].col, route[i].row);
+    }
+    char line[820];
     snprintf(line, sizeof(line),
              "{\"id\":%d,\"state\":\"%s\",\"fresh\":%s,\"link\":%s,\"phase\":\"%s\","
              "\"col\":%.2f,\"row\":%.2f,\"theta\":%.1f,\"seq\":%u,"
              "\"plan\":%d,\"task\":\"%c\",\"gc\":%.1f,\"gr\":%.1f,"
              "\"lat\":%.0f,\"vg\":%.1f,\"wg\":%.0f,"
-             "\"peer\":%s,\"st\":[%d,%d,%d,%d,%d]}",
+             "\"peer\":%s,\"st\":[%d,%d,%d,%d,%d],\"rst\":\"%s\",\"up\":%lu,\"imu\":%s,\"gz\":%.0f,\"ob\":%u,\"obp\":[%.1f,%.1f],\"trim\":[%.2f,%.2f],\"crumb\":%u,\"stk\":%u,\"route\":[%s]}",
              ROVER_ID, state, fresh ? "true" : "false", snap.is_connected ? "true" : "false",
              phaseName(snap.phase), snap.me.col, snap.me.row, snap.me.theta, (unsigned)snap.seq,
              planLoadedId(), target == COLOR_UNKNOWN ? '-' : COLOR_CHAR[target], goal.col, goal.row,
              cal.latency_ms, cal.speed_gain, cal.turn_gain,
-             coordPeer().heard ? "true" : "false", k.deliveries, k.parks, k.helps, k.clears, incidents);
+             coordPeer().heard ? "true" : "false", k.deliveries, k.parks, k.helps, k.clears, incidents,
+             resetName(), (unsigned long)(millis() / 1000),
+             imuReady() ? "true" : "false", gyroZDps(), (unsigned)motionObstacleCount(),
+             motionObstaclePoint().col, motionObstaclePoint().row,
+             motionPivotTrim(), motionFineTrim(),
+             (unsigned)crumb_previous, (unsigned)uxTaskGetStackHighWaterMark(NULL), route_txt);
     commsSend(line);
+}
+
+// Lo último que se reportó, para repetirlo mientras la estrategia está planificando
+static TelemetrySnapshot last_snap;
+static bool last_fresh = false;
+static uint32_t last_status_ms = 0;
+
+static void statusKeepAlive() {
+    crumb(30);                              // Planificando
+    if (millis() - last_status_ms < STATUS_PERIOD_MS) return;
+    last_status_ms = millis();
+    bool official = last_snap.phase == PHASE_READY || last_snap.phase == PHASE_RUNNING;
+    if (!official || STATUS_DURING_ROUND) sendStatus(last_snap, last_fresh, "PLANIFICANDO");
 }
 
 void setup() {
     Serial.begin(115200);
     delay(300);
-    Serial.printf("\n=== ROVER %d ===\n", ROVER_ID);
+    crumb_previous = (crumb_magic == CRUMB_MAGIC && esp_reset_reason() != ESP_RST_POWERON) ? crumb_now : 0;
+    crumb_magic = CRUMB_MAGIC;
+    crumb(1);
+    Serial.printf("\n=== ROVER %d === (arranque: %s, antes estaba en %u)\n", ROVER_ID, resetName(), (unsigned)crumb_previous);
     hardwareInit();
     telemetryInit();
     strategyReset();
+    strategySetKeepAlive(statusKeepAlive);
 }
 
 void loop() {
-    // 1. Comandos (Serial o UDP)
-    String cmd;
-    if (Serial.available()) handleCommand(Serial.readStringUntil('\n'));
-    if (commsPoll(cmd)) handleCommand(cmd);
-
+    crumb(10);                              // Inicio del ciclo
     TelemetrySnapshot snap;
     telemetryGetSnapshot(snap);
     bool fresh = isTelemetryFresh();
     const char* state;
+    last_snap = snap;
+    last_fresh = fresh;
 
     // La ronda arranca en START_PHASE (READY en la versión final) y sigue en RUNNING
     bool round_on = snap.phase == PHASE_RUNNING ||
                     (snap.phase == PHASE_READY && START_PHASE == PHASE_READY);
+
+    // 1. Comandos (Serial o UDP). Desde READY el rover no obedece a NADIE de afuera
+    // (reglamento 9.5, 11.2.6, 11.2.7): los comandos se leen para vaciar la cola y se
+    // descartan, sin excepción (tampoco el STOP: en un intento solo detiene el juez).
+    bool official_round = snap.phase == PHASE_READY || snap.phase == PHASE_RUNNING;
+    String cmd;
+    bool got_serial = Serial.available();
+    String serial_cmd = got_serial ? Serial.readStringUntil('\n') : String();
+    bool got_udp = commsPoll(cmd);
+    if (official_round) {
+        if (got_serial || got_udp) Serial.println("[CMD] Ignorado: ronda oficial en curso");
+        // Lo que se estuviera probando al llegar READY se corta: la ronda manda
+        if (test_until_ms > 0 || goto_active) { test_until_ms = 0; goto_active = false; motionStop(); }
+        practice_run = false;       // Y termina cuando la visión lo diga, no antes ni después
+    } else {
+        if (got_serial) handleCommand(serial_cmd);
+        if (got_udp) handleCommand(cmd);
+    }
     bool want_strategy = round_on || practice_run;
 
     if (test_until_ms > 0) {
@@ -170,8 +245,11 @@ void loop() {
             motionStop();                       // Nunca avanzar con una pose vieja
             state = "SIN_TELEMETRIA";
         } else {
+            crumb(20);                          // Estrategia
             strategyStep(snap);
-            state = strategyStateName();
+            crumb(21);
+            // El giro se trabó contra algo del piso: se avisa mientras lo resuelve
+            state = motionObstacle() ? "OBSTACULO" : strategyStateName();
         }
     } else {
         if (strategy_running) {
@@ -179,13 +257,20 @@ void loop() {
             motionStop();
         }
         state = fresh ? phaseName(snap.phase) : "SIN_TELEMETRIA";
+        // Antes de la ronda también le cuento al compañero dónde estoy: así el enlace
+        // entre rovers se puede comprobar en IDLE, antes de arrancar.
+        if (fresh) {
+            Pose me = motionPredict(snap);
+            coordPublish(me, ACT_IDLE, COLOR_UNKNOWN, false, false, me.p, me.p);
+        }
     }
 
     // 5. Estado al cerebro y al Serial
-    static uint32_t last_status_ms = 0;
+    crumb(40);                              // Reporte de estado
     if (millis() - last_status_ms > STATUS_PERIOD_MS) {
         last_status_ms = millis();
-        sendStatus(snap, fresh, state);
+        // Reporte al monitor: solo sale del rover, la PC no responde nada
+        if (!official_round || STATUS_DURING_ROUND) sendStatus(snap, fresh, state);
     }
     static uint32_t last_print_ms = 0;
     if (millis() - last_print_ms > 1000) {
@@ -195,5 +280,6 @@ void loop() {
                       snap.me.col, snap.me.row, snap.me.theta, planLoadedId(), (unsigned)snap.seq);
     }
 
+    crumb(50);                              // Espera entre ciclos
     delay(LOOP_PERIOD_MS);
 }

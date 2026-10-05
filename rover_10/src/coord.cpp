@@ -6,6 +6,15 @@ static PeerState peer;
 static uint32_t last_heard_ms = 0;
 static uint32_t last_publish_ms = 0;
 
+static char last_line[120] = "";
+
+void coordKeepAlive() {
+    uint32_t now = millis();
+    if (last_line[0] == 0 || now - last_publish_ms < PEER_PUBLISH_MS) return;
+    last_publish_ms = now;
+    commsPeerSend(last_line);
+}
+
 void coordReset() {
     peer = PeerState();
     last_heard_ms = 0;
@@ -18,8 +27,8 @@ void coordPublish(const Pose &me, Activity activity, CubeColor cube, bool carryi
     uint32_t now = millis();
     if (now - last_publish_ms < PEER_PUBLISH_MS && last_publish_ms != 0) return;
     last_publish_ms = now;
-    char line[120];
-    snprintf(line, sizeof(line), "C,%d,%.2f,%.2f,%.1f,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.1f",
+    char *line = last_line;
+    snprintf(line, sizeof(last_line), "C,%d,%.2f,%.2f,%.1f,%d,%d,%d,%d,%.1f,%.1f,%.1f,%.1f",
              ROVER_ID, me.p.col, me.p.row, me.theta, (int)activity, (int)cube, carrying ? 1 : 0, blocked ? 1 : 0,
              goal.col, goal.row, waypoint.col, waypoint.row);
     commsPeerSend(line);

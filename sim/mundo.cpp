@@ -49,7 +49,7 @@ static float out_tol = 2.0f;                    // SIM_OUT_TOL: cuántas celdas 
 // real (6,5 de ancho), a dificultad alta el cubo rojo —que el generador pone justo
 // delante de la salida, entre las filas 19 y 24— quedaría debajo de ellos. Aquí se
 // separan lo necesario para que ese cubo quepa en medio con holgura.
-static const Point START_10 = { 3.75f, 12.0f }, START_11 = { 3.75f, 31.0f };
+static Point START_10 = { 3.75f, 12.0f }, START_11 = { 3.75f, 31.0f };   // SIM_START="c10,r10,c11,r11" las cambia
 
 // --- Un rover: su firmware (biblioteca) y su cuerpo en el mundo ---------------------
 struct RoverOut { float left, right; const char *state; int target; float goal_col, goal_row; };
@@ -390,6 +390,7 @@ int main(int argc, char **argv) {
     if (getenv("SIM_OUT_TOL")) out_tol = atof(getenv("SIM_OUT_TOL"));
     if (getenv("SIM_PEER")) radio_on = atoi(getenv("SIM_PEER")) != 0;
     if (getenv("SIM_PEER_LOSS")) radio_loss = atof(getenv("SIM_PEER_LOSS"));
+    if (getenv("SIM_START")) sscanf(getenv("SIM_START"), "%f,%f,%f,%f", &START_10.col, &START_10.row, &START_11.col, &START_11.row);
     int seed = argc > 1 ? atoi(argv[1]) : 1;
     std::string plan = argc > 2 ? argv[2] : "P,1,10=rgb,11=";
     std::string flag = argc > 3 ? argv[3] : "";
@@ -407,11 +408,11 @@ int main(int argc, char **argv) {
     robots.resize(with_11 ? 2 : 1);
     if (!loadRover(robots[0], (std::string(dir) + "/librover_10.so").c_str())) return 2;
     robots[0].marker = START_10;
-    robots[0].true_latency = 480; robots[0].true_speed = 16.2f; robots[0].true_turn = 300;      // config.h cree 435 / 17.8 / 335
+    robots[0].true_latency = 455; robots[0].true_speed = 17.7f; robots[0].true_turn = 320;      // config.h cree 413 / 19.4 / 358
     if (with_11) {
         if (!loadRover(robots[1], (std::string(dir) + "/librover_11.so").c_str())) return 2;
         robots[1].marker = START_11;
-        robots[1].true_latency = 540; robots[1].true_speed = 14.2f; robots[1].true_turn = 250;  // config.h cree 490 / 15.6 / 278
+        robots[1].true_latency = 330; robots[1].true_speed = 22.0f; robots[1].true_turn = 415;  // config.h cree 300 / 24.1 / 464
     }
 
     std::mt19937 rng(seed);
@@ -449,6 +450,12 @@ int main(int argc, char **argv) {
             }
         }
         snprintf(layout_name, sizeof(layout_name), "al azar");
+    }
+
+    if (getenv("SIM_CUBES")) {
+        // Disposición a mano (para reproducir una prueba de cancha): rojo, verde, azul
+        sscanf(getenv("SIM_CUBES"), "%f,%f,%f,%f,%f,%f", &cubes[0].col, &cubes[0].row, &cubes[1].col, &cubes[1].row, &cubes[2].col, &cubes[2].row);
+        snprintf(layout_name, sizeof(layout_name), "a mano");
     }
 
     if (flag == "--disposicion") {

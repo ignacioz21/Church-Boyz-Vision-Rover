@@ -40,6 +40,9 @@ void coordReset();
 void coordPublish(const Pose &me, Activity activity, CubeColor cube, bool carrying, bool blocked,
                   Point goal, Point waypoint);
 
+// Vuelve a mandar el último estado (para usar mientras se planifica y no hay ciclo normal)
+void coordKeepAlive();
+
 // Lo último que se sabe del compañero. Lee los mensajes pendientes.
 const PeerState& coordPeer();
 

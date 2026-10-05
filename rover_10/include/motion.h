@@ -15,6 +15,15 @@ struct Pose {
 };
 Pose motionPredict(const TelemetrySnapshot &snap);
 
+// Giro trabado: el robot manda a pivotar y el giroscopio dice que no gira (un desnivel
+// del piso, algo que lo frena). motionObstacle() queda en true un par de segundos
+// después de cada detección; motionObstacleCount() es el total desde que encendió.
+bool motionObstacle();
+uint16_t motionObstacleCount();
+float motionPivotTrim();            // Potencia extra de giro que está aplicando la regulación
+float motionFineTrim();
+Point motionObstaclePoint();        // Dónde fue el último (eje del robot)
+
 // Toda orden de motor de la estrategia pasa por aquí: queda registrada para la predicción
 void motionDrive(float left, float right);
 void motionStop();

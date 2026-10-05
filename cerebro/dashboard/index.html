@@ -17,8 +17,12 @@
   .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px; }
   .panel h2 { margin:0 0 8px; font-size:14px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   /* Mapa y cámara lado a lado, del mismo tamaño y siempre dentro de la pantalla */
-  .views { display:grid; grid-template-columns:1fr 1fr; gap:12px; align-items:start;
-           --view: min(calc((100vw - 380px - 104px) / 2), calc(100vh - 120px)); }
+  .views { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; align-items:start;
+           --view: min(calc((100vw - 380px - 142px) / 3), calc(100vh - 120px)); }
+  /* Pantalla angosta: dos por fila, y las rutas pasan abajo */
+  @media (max-width: 1500px) {
+    .views { grid-template-columns:1fr 1fr; --view: min(calc((100vw - 380px - 104px) / 2), calc(100vh - 120px)); }
+  }
   .view { width:var(--view); height:var(--view); display:block; margin:0 auto;
           background:#fafafa; border:1px solid var(--line); border-radius:6px; }
   #video { height:auto; max-height:var(--view); object-fit:contain; background:#111; }
@@ -43,6 +47,7 @@
 <header>
   <h1>Cerebro — Monitor</h1>
   <span>
+    <button onclick="window.open('/rutas', 'rutas', 'width=900,height=980')" title="Abre las rutas en grande, en una ventana aparte">Rutas en grande</button>
     <button id="rec-btn" onclick="toggleRecord()">Grabar</button>
     <span id="rec-state" class="note"></span>
     &nbsp; Visión: <span id="vision-state" class="bad">sin datos</span>
@@ -54,6 +59,10 @@
       <h2>Mapa</h2>
       <canvas id="map" class="view" width="700" height="700"></canvas>
     </div>
+    <div class="panel">
+      <h2>Rutas</h2>
+      <canvas id="routes" class="view" width="900" height="900"></canvas>
+    </div>
     <div class="panel" id="video-panel">
       <h2>Cámara</h2>
       <img id="video" class="view" alt="" onerror="document.getElementById('video-panel').hidden=true">
@@ -62,6 +71,7 @@
   <aside>
     <div class="panel">
       <button class="stop wide" onclick="send('*','r')">STOP TODOS</button>
+      <button class="wide" onclick="send('*','S')" title="Arranca la estrategia en los dos rovers a la vez">Iniciar práctica: los dos</button>
       <div id="rovers"></div>
       <p class="note">Comandos solo para pruebas. Durante un intento ninguna PC puede comandar a los rovers (reglamento 6.3).</p>
     </div>
@@ -73,9 +83,8 @@
 </main>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
+<script src="/dashboard/rutas.js"></script>
 <script>
-const COLORS = { red:'#dc2626', green:'#16a34a', blue:'#2563eb' };
-const ROVER_COLORS = { 10:'#d97706', 11:'#7c3aed' };
 const socket = io();
 const roverStatus = {};
 let lastWorld = 0;
@@ -111,7 +120,7 @@ function renderRovers() {
   const now = Date.now() / 1000;
   for (const id of [10, 11]) {
     const s = roverStatus[id];
-    const online = s && now - s.t < 1.5;
+    const online = s && now - s.t < 3.5;
     const st = document.getElementById(`state-${id}`);
     st.textContent = online ? s.state : 'OFFLINE';
     st.className = online ? 'ok' : 'bad';
@@ -122,7 +131,9 @@ function renderRovers() {
       `<br>enlace visión: ${yes(s.link)} · pose fresca: ${yes(s.fresh)}` +
       `<br>plan ${s.plan || 'a bordo'} · cubo ${s.task ?? '-'} · objetivo (${(s.gc ?? 0).toFixed(1)}, ${(s.gr ?? 0).toFixed(1)})` +
       `<br>latencia ${s.lat ?? '?'} ms · avance ${s.vg ?? '?'} · giro ${s.wg ?? '?'}` +
-      (s.st ? `<br>escucha al compañero: ${yes(s.peer)} · entregas ${s.st[0]} · aparta ${s.st[1]} · ayuda ${s.st[2]} · se corre ${s.st[3]} · incidentes ${s.st[4]}` : '');
+      (s.st ? `<br>escucha al compañero: ${yes(s.peer)} · entregas ${s.st[0]} · aparta ${s.st[1]} · ayuda ${s.st[2]} · se corre ${s.st[3]} · incidentes ${s.st[4]}` : '') +
+      (s.rst ? `<br>último arranque: ${s.rst} · hace ${s.up} s` + (s.crumb ? ` · antes estaba en ${s.crumb}` : '') + (s.stk !== undefined ? ` · pila libre ${s.stk}` : '') : '') +
+      (s.imu !== undefined ? `<br>giroscopio: ${yes(s.imu)} · gira a ${s.gz} °/s · obstáculos ${s.ob}` + (s.trim ? ` · refuerzo de giro +${s.trim[0].toFixed(2)} / ${s.trim[1] >= 0 ? '+' : ''}${s.trim[1].toFixed(2)}` : '') : '');
   }
 }
 
@@ -184,6 +195,11 @@ socket.on('world', w => {
   const st = document.getElementById('vision-state');
   st.textContent = `${w.phase} · seq ${w.seq}`; st.className = 'ok';
   drawWorld(w);
+  // Panel de rutas: lo que cada rover piensa recorrer (solo de los que están reportando)
+  drawRoutesMap(document.getElementById('routes'), w, id => {
+    const s = roverStatus[id];
+    return s && Date.now() / 1000 - s.t < 3.5 ? s : null;
+  });
 });
 // Se sella con el reloj del navegador: el del servidor puede no coincidir
 socket.on('rover_status', s => { roverStatus[s.id] = { ...s, t: Date.now() / 1000 }; });

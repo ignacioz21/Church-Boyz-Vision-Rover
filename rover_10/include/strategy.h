@@ -16,6 +16,11 @@ void strategyStep(const TelemetrySnapshot &snap);
 const char* strategyStateName();
 CubeColor strategyTarget();     // Cubo en curso (COLOR_UNKNOWN si ninguno)
 Point strategyGoal();           // Punto al que se dirige ahora
+// Lo que piensa recorrer, en orden (para el monitor): ruta en curso, cubo y destino.
+int strategyRoute(Point *out, int max);
+// Planificar puede tardar un par de segundos. Esta función se llama cada tanto mientras
+// tanto, para que el programa principal siga reportando (y no parezca apagado).
+void strategySetKeepAlive(void (*fn)());
 
 // --- Diagnóstico (monitor del cerebro y simulador) ---------------------------------
 // Cuántas veces pasó cada cosa en la ronda en curso.

@@ -31,6 +31,8 @@ float pointToSegment(Point p, Point a, Point b);
 // centrado un poco por delante de su marcador.
 Point peerCenter(const TelemetrySnapshot &snap);
 #define PEER_BODY_RADIUS 6.3f
+// Menos que esto del centro del compañero es tocarlo de verdad: nunca se permite
+#define PEER_TOUCH_RADIUS 3.6f
 
 // --- Huella real del robot (cuerpo + pinzas) --------------------------------
 // 'axle' es el eje de las ruedas y 'theta' el rumbo. Las medidas salen de config.h.
@@ -40,6 +42,21 @@ Point peerCenter(const TelemetrySnapshot &snap);
 bool footprintInField(Point axle, float theta, const TelemetrySnapshot &snap, float line_margin = 0.0f);
 
 // ¿La huella toca un objeto redondo de radio 'radius' centrado en 'obj'?
+// Distancia de 'obj' a la huella del robot (0 si está adentro del cuerpo)
+float footprintDistance(Point axle, float theta, Point obj);
+// Pose actual del robot; la usa poseClear para la distancia a guardar con el compañero
+void geometrySetSelf(Point axle, float theta);
+
+// Compañero QUIETO (él mismo avisa que espera o que terminó): en vez del círculo
+// grande, que cubre hacia dónde podría moverse, se usa su forma real con una holgura
+// chica. Es lo que permite salir cuando los dos arrancan lado a lado.
+void geometrySetPeerStill(bool still);
+bool geometryPeerStill();
+#define PEER_STILL_MARGIN 1.0f
+struct PeerShape { Point pts[12]; Point axle; float c, s; };
+void peerShape(const TelemetrySnapshot &snap, PeerShape &out);
+// ¿La huella del robot (eje en 'axle', rumbo con coseno 'c' y seno 's') toca esa forma?
+bool peerShapeHits(const PeerShape &peer, Point axle, float c, float s, float margin);
 bool footprintHits(Point axle, float theta, Point obj, float radius);
 
 // ¿En esa pose el robot está dentro de las líneas y no toca ningún cubo ni al

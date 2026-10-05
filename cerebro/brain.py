@@ -34,6 +34,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 app = Flask(__name__, static_folder=os.path.join(HERE, "dashboard"))
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 
+# Última fase publicada por la visión. Desde READY el cerebro no transmite NADA a los
+# rovers (reglamento 6.3, 11.2.7): solo escucha y graba.
+vision_phase = None
+LOCKED_PHASES = ("READY", "RUNNING")
+
 cmd_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 cmd_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
@@ -62,12 +67,21 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+@app.route("/rutas")
+def routes_page():
+    """Ventana aparte: el mapa en grande con la ruta que cada rover piensa recorrer."""
+    return send_from_directory(app.static_folder, "rutas.html")
+
+
 @socketio.on("command")
 def on_command(data):
     """data = {"rover": 10 | 11 | "*", "cmd": "r" | "f" | "M,0.4,0.4"}"""
     target = str(data.get("rover", "*"))
     cmd = str(data.get("cmd", "")).strip()
     if not cmd:
+        return
+    if vision_phase in LOCKED_PHASES:
+        log("BLOQUEADO", f"Ronda en curso ({vision_phase}): no se envía '{cmd}'. Reglamento 11.2.7.")
         return
     payload = f"{target}:{cmd}"
     cmd_sock.sendto(payload.encode(), (ROVER_BCAST, ROVER_CMD_PORT))
@@ -76,6 +90,7 @@ def on_command(data):
 
 def vision_loop():
     """Mantiene la conexión con la visión y emite el último mundo al dashboard."""
+    global vision_phase
     while True:
         try:
             with socket.create_connection((VISION_HOST, VISION_PORT), timeout=3) as s:
@@ -95,6 +110,7 @@ def vision_loop():
                     if msg.get("v") != 2:
                         continue
                     last_emit = time.time()
+                    vision_phase = msg.get("phase")
                     recorder.world(msg)
                     socketio.emit("world", msg)
         except (OSError, ConnectionError, ValueError) as e:
@@ -108,7 +124,7 @@ def status_loop():
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     sock.bind(("0.0.0.0", BRAIN_STATUS_PORT))
     while True:
-        data, addr = sock.recvfrom(1024)
+        data, addr = sock.recvfrom(2048)
         try:
             status = json.loads(data.decode())
         except ValueError:

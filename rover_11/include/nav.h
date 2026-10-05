@@ -50,4 +50,7 @@ bool navHasRoute();
 
 void navReset();
 
+// Ruta en curso, resumida en sus esquinas (para el monitor). Devuelve cuántos puntos copió.
+int navRoute(Point *out, int max);
+
 #endif // ROVER_NAV_H
