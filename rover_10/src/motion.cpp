@@ -38,6 +38,15 @@ static bool gyro_trusted = false;
 static float pivot_trim = 0.0f;
 static float fine_trim = 0.0f;
 float motionPivotTrim() { return pivot_trim; }
+
+// Para el monitor: de qué forma está girando ahora (ver motion.h) y lo último que se
+// les mandó a los motores
+static uint8_t turn_mode = 0;
+static uint32_t turn_mode_ms = 0;
+static float last_left = 0.0f, last_right = 0.0f;
+static void setTurnMode(uint8_t m) { turn_mode = m; turn_mode_ms = millis(); }
+int motionTurnMode() { return millis() - turn_mode_ms < 300 ? turn_mode : 0; }
+void motionLastCommand(float *left, float *right) { *left = last_left; *right = last_right; }
 float motionFineTrim() { return fine_trim; }
 
 bool motionObstacle() { return millis() < obstacle_until_ms; }
@@ -90,6 +99,14 @@ static void stallCheck(bool carrying, Point where) {
     if (stalled) stallDetected(carrying, where);
 }
 
+static float cruise_power = POWER_CRUISE, max_speed = MAX_SPEED;
+void motionSetSpeed(float cruise, float top) {
+    cruise_power = constrain(cruise, POWER_MIN_MOVE + 0.10f, 0.70f);
+    max_speed = constrain(top, 5.0f, 16.0f);
+}
+float motionCruise() { return cruise_power; }
+float motionMaxSpeed() { return max_speed; }
+
 void motionDrive(float left, float right) {
     if (left != 0.0f || right != 0.0f) last_motion_cmd_ms = millis();
     bool pivoting = left * right < 0.0f && fabsf(left) > 0.15f && fabsf(right) > 0.15f;
@@ -103,10 +120,12 @@ void motionDrive(float left, float right) {
     // Tope de velocidad de avance: por encima, la cámara pierde el marcador (sale
     // movido) y el robot se queda sin pose. Los pivotes (left = -right) no cambian.
     float v = fabsf(cal.speed_gain * (left + right) / 2.0f);
-    if (v > MAX_SPEED) {
-        left *= MAX_SPEED / v;
-        right *= MAX_SPEED / v;
+    if (v > max_speed) {
+        left *= max_speed / v;
+        right *= max_speed / v;
     }
+    last_left = left;
+    last_right = right;
     hist[hist_head] = { millis(), left, right };
     hist_head = (hist_head + 1) % HIST;
     setMotors(left, right);
@@ -231,7 +250,8 @@ static void pivotRegulate(float target_dps) {
     float dt = (now - trim_sample_ms) / 1000.0f;
     trim_sample_ms = now;
     float error = target_dps - fabsf(gyroZDps());
-    pivot_trim = constrain(pivot_trim + PIVOT_TRIM_GAIN * error * dt, 0.0f, PIVOT_TRIM_MAX);
+    // Puede bajar de la base (si el robot gira de más, p. ej. porque perdió el cubo), no solo subir
+    pivot_trim = constrain(pivot_trim + PIVOT_TRIM_GAIN * error * dt, POWER_MIN_PIVOT - 0.04f - POWER_PIVOT_CARRY, PIVOT_TRIM_MAX);
 }
 
 // Ajuste fino con giroscopio (motionTurnTo): descanso después de cada corte, para no ir
@@ -287,7 +307,11 @@ static bool fineStep() {
 }
 
 static void pivot(int dir, float remaining_deg) {
-    float power = constrain(remaining_deg * 0.006f, POWER_MIN_PIVOT, pivot_gently ? POWER_MIN_PIVOT : POWER_MAX_PIVOT);
+    // Con cubo y giroscopio: potencia base propia del robot, y de ahí la regula hacia
+    // arriba o hacia abajo según lo que gire de verdad. Sin giroscopio no hay con qué
+    // regular, así que se queda en la mínima de siempre.
+    float carry_base = imuReady() ? POWER_PIVOT_CARRY : POWER_MIN_PIVOT;
+    float power = pivot_gently ? carry_base : constrain(remaining_deg * 0.006f, POWER_MIN_PIVOT, POWER_MAX_PIVOT);
     // Velocidad que se quiere: lenta con un cubo; sin cubo, la que daría esa potencia
     // en un robot que responde bien
     // La potencia extra regulada es SOLO para girar con un cubo en las pinzas, que es
@@ -319,10 +343,12 @@ bool motionTurnTo(const Pose &pose, float target_heading, float tol_deg,
     // Giro trabado: quieto mientras avisa; después, un corrimiento recto (si hay lugar)
     bool carrying = carried != COLOR_UNKNOWN;
     if (now < halt_until_ms) {
+        setTurnMode(6);
         motionDrive(0.0f, 0.0f);
         return false;
     }
     if (now < bump_until_ms) {
+        setTurnMode(7);
         float creep = POWER_MIN_MOVE + 0.08f;
         if (poseClear(advance(pose.p, pose.theta, bump_dir * 1.5f), pose.theta, snap, carried, 0.2f, 0.5f))
             motionDrive(bump_dir * creep, bump_dir * creep);
@@ -341,10 +367,12 @@ bool motionTurnTo(const Pose &pose, float target_heading, float tol_deg,
         pulse_sample_ms = now;
     }
     if (now < pulse_end_ms) {
+        setTurnMode(3);
         pivot(pulse_dir, 0.0f);
         return false;
     }
     if (now < settle_end_ms) {
+        setTurnMode(3);
         motionDrive(0.0f, 0.0f);
         return false;
     }
@@ -357,7 +385,7 @@ bool motionTurnTo(const Pose &pose, float target_heading, float tol_deg,
     }
 
     // Ajuste fino en curso (o su espera): no se decide nada hasta que termine
-    if (fineStep()) return false;
+    if (fineStep()) { setTurnMode(2); return false; }
 
     float diff = wrapDeg(target_heading - pose.theta);
     // Una vez dentro de la tolerancia se da por bueno con un margen extra: la cámara
@@ -365,6 +393,7 @@ bool motionTurnTo(const Pose &pose, float target_heading, float tol_deg,
     if (fabsf(diff) <= tol_deg + (fine_holding ? FINE_HOLD_EXTRA : 0.0f)) {
         fine_holding = true;
         turn_dir = 0;
+        setTurnMode(0);
         motionStop();
         return true;
     }
@@ -384,8 +413,11 @@ bool motionTurnTo(const Pose &pose, float target_heading, float tol_deg,
         // Con giroscopio: de corrido y despacio. El rumbo se conoce al instante (no hay
         // que esperar a la cámara en cada paso), así que se gira hasta llegar y se corta
         // un poco antes, según la velocidad que lleve, para que termine justo.
-        if (imuReady() && gyro_trusted) {
+        // Basta con que el giroscopio haya respondido: con un cubo el robot puede no pasar
+        // nunca de 40 grados/s, y sin esto caía al modo por pulsos (el de sin giroscopio).
+        if (imuReady()) {
             turn_dir = shortest;
+            setTurnMode(2);
             fineBegin(diff);
             fineStep();
             return false;
@@ -431,6 +463,7 @@ bool motionTurnTo(const Pose &pose, float target_heading, float tol_deg,
         }
         if (escape_dir != 0 &&
             poseClear(advance(pose.p, pose.theta, escape_dir * 1.0f), pose.theta, snap, carried, 0.2f, 0.5f)) {
+            setTurnMode(4);
             motionDrive(escape_dir * creep, escape_dir * creep);
             return false;
         }
@@ -440,12 +473,14 @@ bool motionTurnTo(const Pose &pose, float target_heading, float tol_deg,
         if (pivotClear(pose.p, pose.theta, target_heading, shortest, snap, carried, PIVOT_TIGHT)) turn_dir = shortest;
         else if (pivotClear(pose.p, pose.theta, target_heading, -shortest, snap, carried, PIVOT_TIGHT)) turn_dir = -shortest;
         else {
+            setTurnMode(5);
             motionDrive(0.0f, 0.0f);
             return false;
         }
     }
 
     float remaining = fmodf((target_heading - pose.theta) * turn_dir + 720.0f, 360.0f);
+    setTurnMode(1);
     pivot(turn_dir, remaining);
     return false;
 }

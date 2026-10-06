@@ -37,6 +37,12 @@
   #log { height:220px; overflow-y:auto; font:12px ui-monospace, monospace; background:#fafafa;
          border:1px solid var(--line); border-radius:6px; padding:6px; }
   .note { color:var(--muted); font-size:12px; }
+  .gen { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:6px; }
+  .gen input { width:64px; padding:5px; border:1px solid var(--line); border-radius:5px; font:inherit; }
+  .gen label { color:var(--muted); font-size:12px; }
+  #rounds table { width:100%; border-collapse:collapse; font:12px ui-monospace, monospace; }
+  #rounds th, #rounds td { text-align:left; padding:3px 8px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  #rounds th { color:var(--muted); font-weight:600; }
   @media (max-width: 1100px) {
     main, .views { grid-template-columns: 1fr; }
     .views { --view: min(calc(100vw - 50px), 70vh); }
@@ -51,6 +57,8 @@
     <button id="rec-btn" onclick="toggleRecord()">Grabar</button>
     <span id="rec-state" class="note"></span>
     &nbsp; Visión: <span id="vision-state" class="bad">sin datos</span>
+    &nbsp; Cerebro: <b id="cerebro-state" class="note" title="Fase CEREBRO: antes de READY la PC calcula el reparto y las rutas y las carga en los rovers">—</b>
+    <button id="cerebro-btn" onclick="socket.emit('cerebro', { on: !cerebroOn })" title="Apagada, los rovers planifican todo a bordo (como antes)">Apagar</button>
   </span>
 </header>
 <main>
@@ -67,11 +75,31 @@
       <h2>Cámara</h2>
       <img id="video" class="view" alt="" onerror="document.getElementById('video-panel').hidden=true">
     </div>
+    <div class="panel" id="rounds" style="grid-column:1 / -1">
+      <h2>Rondas grabadas</h2>
+      <div id="rounds-body" class="note">Todavía no hay rondas en el índice.</div>
+    </div>
   </section>
   <aside>
     <div class="panel">
+      <h2>Disposición de práctica</h2>
+      <div class="gen">
+        <label for="gen-level">Nivel</label><input id="gen-level" type="number" min="0.2" max="0.6" step="0.01" value="0.40">
+        <label for="gen-number">N.º</label><input id="gen-number" type="number" min="1" step="1" value="1">
+        <button onclick="generate(0)" title="Muestra en el mapa dónde poner cada cubo para ese nivel">Generar</button>
+        <button onclick="generate(1)" title="Otra disposición del mismo nivel">Siguiente</button>
+        <button onclick="socket.emit('generate', { clear: true })">Quitar</button>
+      </div>
+      <p class="note" id="gen-state">Sin disposición generada. Mismo nivel y mismo número dan siempre la misma.</p>
+      <div class="gen">
+        <label>Cámara</label>
+        <button onclick="socket.emit('camera', { preset: 'dia' })" title="Luz de día fuerte">Día</button>
+        <button onclick="socket.emit('camera', { preset: 'noche' })" title="Luz baja o de lámpara: sube la ganancia para que el cubo azul se vea">Tarde / noche</button>
+        <span class="note" id="cam-state"></span>
+      </div>
       <button class="stop wide" onclick="send('*','r')">STOP TODOS</button>
-      <button class="wide" onclick="send('*','S')" title="Arranca la estrategia en los dos rovers a la vez">Iniciar práctica: los dos</button>
+      <button class="wide" onclick="socket.emit('practice')" title="Espera a que el plan del cerebro quede cargado y arranca la estrategia en los dos rovers a la vez">Iniciar práctica: los dos</button>
+      <p class="note" id="cerebro-detail">Fase CEREBRO: sin plan todavía.</p>
       <div id="rovers"></div>
       <p class="note">Comandos solo para pruebas. Durante un intento ninguna PC puede comandar a los rovers (reglamento 6.3).</p>
     </div>
@@ -102,6 +130,9 @@ function log(tag, msg) {
   el.scrollTop = el.scrollHeight;
 }
 
+// Cómo está girando el rover (campo "tm" del estado; ver rover_*/include/motion.h)
+const GIRO = { 1: 'normal', 2: 'ajuste fino', 3: 'por pulsos', 4: 'haciendo sitio', 5: 'sin lado libre', 6: 'trabado', 7: 'saliendo del trabado' };
+
 // Las tarjetas se arman una vez; después solo se actualiza el texto (los
 // botones no se recrean, así un clic en STOP nunca se pierde).
 document.getElementById('rovers').innerHTML = [10, 11].map(id => `
@@ -129,12 +160,42 @@ function renderRovers() {
     document.getElementById(`meta-${id}`).innerHTML =
       `${s.ip} · ${s.phase} · (${s.col.toFixed(1)}, ${s.row.toFixed(1)}) ${s.theta.toFixed(0)}° · seq ${s.seq}` +
       `<br>enlace visión: ${yes(s.link)} · pose fresca: ${yes(s.fresh)}` +
-      `<br>plan ${s.plan || 'a bordo'} · cubo ${s.task ?? '-'} · objetivo (${(s.gc ?? 0).toFixed(1)}, ${(s.gr ?? 0).toFixed(1)})` +
+      `<br>plan ${s.plan || 'a bordo'}` + (s.rt !== undefined ? ` (${s.rt} ruta${s.rt === 1 ? '' : 's'} cargada${s.rt === 1 ? '' : 's'})` : '') + ` · cubo ${s.task ?? '-'} · objetivo (${(s.gc ?? 0).toFixed(1)}, ${(s.gr ?? 0).toFixed(1)})` +
+      (s.np ? `<br>calculó rutas ${s.np[0]} veces (${(s.np[1] / 1000).toFixed(1)} s parado pensando)` + (s.spd ? ` · crucero ${s.spd[0].toFixed(2)}, tope ${s.spd[1].toFixed(0)}` : '') + (s.gs ? ' · <b class="bad">arrancó sin giroscopio</b>' : '') : '') +
+      (s.tm !== undefined ? `<br>motores ${s.mot[0].toFixed(2)} / ${s.mot[1].toFixed(2)}` + (s.tm ? ` · girando: ${GIRO[s.tm] || s.tm}` : '') + (s.as ? ' · asentando el cubo' : '') : '') +
       `<br>latencia ${s.lat ?? '?'} ms · avance ${s.vg ?? '?'} · giro ${s.wg ?? '?'}` +
       (s.st ? `<br>escucha al compañero: ${yes(s.peer)} · entregas ${s.st[0]} · aparta ${s.st[1]} · ayuda ${s.st[2]} · se corre ${s.st[3]} · incidentes ${s.st[4]}` : '') +
-      (s.rst ? `<br>último arranque: ${s.rst} · hace ${s.up} s` + (s.crumb ? ` · antes estaba en ${s.crumb}` : '') + (s.stk !== undefined ? ` · pila libre ${s.stk}` : '') : '') +
-      (s.imu !== undefined ? `<br>giroscopio: ${yes(s.imu)} · gira a ${s.gz} °/s · obstáculos ${s.ob}` + (s.trim ? ` · refuerzo de giro +${s.trim[0].toFixed(2)} / ${s.trim[1] >= 0 ? '+' : ''}${s.trim[1].toFixed(2)}` : '') : '');
+      (s.rst ? `<br>último arranque: ${s.rst} · hace ${s.up} s` + (s.crumb ? ` · antes estaba en ${s.crumb}` : '') + (s.stk !== undefined ? ` · pila libre ${s.stk}` : '') + (s.res ? ` · <b class="bad">retomó ${s.res} vez/veces</b>` : '') : '') +
+      (s.imu !== undefined ? `<br>giroscopio: ${yes(s.imu)} · gira a ${s.gz} °/s · obstáculos ${s.ob}` + (s.gf ? ` · <b class="bad">fallas del giroscopio ${s.gf}</b>` : '') + (s.trim ? ` · refuerzo de giro +${s.trim[0].toFixed(2)} / ${s.trim[1] >= 0 ? '+' : ''}${s.trim[1].toFixed(2)}` : '') : '');
   }
+}
+
+// Disposición de práctica: pedirla al cerebro y mostrar el estado de colocación
+function generate(step) {
+  const number = document.getElementById('gen-number');
+  if (step) number.value = Number(number.value) + step;
+  socket.emit('generate', { nivel: Number(document.getElementById('gen-level').value), numero: Number(number.value) });
+}
+
+function renderPlacement(state) {
+  const el = document.getElementById('gen-state');
+  if (!shadowLayout) { el.textContent = 'Sin disposición generada. Mismo nivel y mismo número dan siempre la misma.'; el.className = 'note'; return; }
+  const names = { red: 'rojo', green: 'verde', blue: 'azul' };
+  const cubes = Object.entries(state.cubes).map(([c, ok]) => `${names[c]} ${ok ? '✓' : '✗'}`).join(' · ');
+  const rovers = Object.entries(state.rovers).map(([id, ok]) => `R${id} ${ok ? '✓' : '✗'}`).join(' · ');
+  el.innerHTML = `Nivel ${shadowLayout.nivel.toFixed(2)} · n.º ${shadowLayout.numero} · ${cubes} · ${rovers} — ` +
+    (state.ready ? '<b class="ok">disposición lista</b>' : '<b class="bad">falta colocar</b>');
+}
+
+function renderRounds(rows) {
+  const el = document.getElementById('rounds-body');
+  if (!rows || !rows.length) { el.textContent = 'Todavía no hay rondas en el índice.'; return; }
+  const cell = v => (v === '' || v === undefined || v === null) ? '—' : v;
+  el.innerHTML = '<table><tr><th>Ronda</th><th>Inicio</th><th>Nivel</th><th>N.º</th><th>Estimado</th><th>Entregados</th>' +
+    '<th>3.er cubo</th><th>Incidentes</th><th>Reinicios</th><th>Firmware</th><th>Cierre</th></tr>' +
+    rows.map(r => `<tr><td>${r.ronda.slice(9)}</td><td>${r.disparador}</td><td>${cell(r.nivel)}${r.mal_colocada === 'True' ? ' ⚠' : ''}</td>` +
+      `<td>${cell(r.numero)}</td><td>${cell(r.nivel_estimado)}</td><td>${r.entregados}/3</td><td>${r.t_tercer_cubo ? r.t_tercer_cubo + ' s' : '—'}</td>` +
+      `<td>${r.incidentes}</td><td>${r.reinicios}</td><td>${cell(r.firmware)}</td><td>${r.cierre}</td></tr>`).join('') + '</table>';
 }
 
 function drawWorld(w) {
@@ -159,6 +220,10 @@ function drawWorld(w) {
 
   ctx.fillStyle = '#9ca3af';
   ctx.beginPath(); ctx.arc(X(w.start.col), Y(w.start.row), 4, 0, 7); ctx.fill();
+
+  // Sombras de la disposición de práctica y estado de colocación
+  const placement = drawShadows(ctx, w, s);
+  if (placement) renderPlacement(placement);
 
   const half = w.cube_side / 2;
   for (const c of w.cubes) {
@@ -187,8 +252,36 @@ let recording = false;
 function toggleRecord() { socket.emit('record', { on: !recording }); }
 socket.on('recording', d => {
   recording = d.on;
-  document.getElementById('rec-btn').textContent = d.on ? 'Detener grabación' : 'Grabar';
-  document.getElementById('rec-state').textContent = d.on ? `● grabando ${d.file}` : (d.file ? `guardado ${d.file}` : '');
+  document.getElementById('rec-btn').textContent = d.on ? 'Cerrar ronda' : 'Grabar';
+  const level = d.nivel != null ? `nivel ${Number(d.nivel).toFixed(2)} n.º ${d.numero}` :
+                d.nivel_estimado != null ? `nivel ~${Number(d.nivel_estimado).toFixed(2)} (estimado)` : 'nivel desconocido';
+  document.getElementById('rec-state').textContent = d.on
+    ? `● ronda en curso (${d.trigger}): ${level}, ${Math.round(d.elapsed)} s`
+    : '○ grabación continua' + (d.file ? ` · última ronda ${d.file.slice(15, 21)}` : '');
+});
+socket.on('layout', l => { shadowLayout = l; if (!l) renderPlacement(null); });
+socket.on('rounds', renderRounds);
+// Fase CEREBRO: estado, plan y qué rover ya lo confirmó
+let cerebroOn = true;
+const NOMBRE = { r: 'rojo', g: 'verde', b: 'azul' };
+socket.on('cerebro', c => {
+  cerebroOn = c.activo;
+  cerebroPlan = c.activo ? c.plan : null;
+  const st = document.getElementById('cerebro-state');
+  st.textContent = c.estado + (c.estado === 'cargado' ? ' ✓' : '');
+  st.className = c.estado === 'cargado' ? 'ok' : (c.estado === 'apagado' || c.estado === 'sin plan') ? 'bad' : 'note';
+  document.getElementById('cerebro-btn').textContent = c.activo ? 'Apagar' : 'Encender';
+  let text = `Fase CEREBRO: ${c.estado}` + (c.texto ? ` (${c.texto})` : '') + '.';
+  if (c.plan) {
+    const tasks = Object.entries(c.plan.tareas).map(([id, t]) =>
+      `Rover ${id}: ${[...t].map(x => NOMBRE[x]).join(' → ') || 'nada'} ${c.ack[id] ? '✓' : '…'}`).join(' · ');
+    text += ` Plan ${c.plan.id} — ${tasks}` + (c.plan.comodin ? ` · comodín: ${NOMBRE[c.plan.comodin[0]]}` : '') +
+            (c.plan.juntos ? ' · salen a la vez' : ' · sale primero el 10') + ` · estimado ${c.plan.costo.toFixed(0)} s`;
+  }
+  document.getElementById('cerebro-detail').textContent = text;
+});
+socket.on('camera', c => {
+  document.getElementById('cam-state').textContent = `ajuste: ${c.preset === 'dia' ? 'día' : 'tarde / noche'}` + (c.values ? ` (${c.values})` : '');
 });
 socket.on('world', w => {
   lastWorld = Date.now();

@@ -26,6 +26,19 @@ Point motionObstaclePoint();        // Dónde fue el último (eje del robot)
 
 // Toda orden de motor de la estrategia pasa por aquí: queda registrada para la predicción
 void motionDrive(float left, float right);
+
+// Potencia de crucero y tope de velocidad (celdas/s). Arrancan en los valores de
+// config.h (los probados); se pueden cambiar antes de la ronda con el comando "V" para
+// elegirlos en el lugar. Un reinicio vuelve a los de config.h.
+void motionSetSpeed(float cruise, float max_speed);
+float motionCruise();
+float motionMaxSpeed();
+
+// Para el monitor. Cómo está girando ahora: 0 no gira · 1 giro normal · 2 ajuste fino
+// (giroscopio) · 3 por pulsos · 4 haciendo sitio en recta (ningún lado libre) · 5 quieto
+// sin lado libre · 6 detenido por giro trabado · 7 corrimiento tras trabarse
+int motionTurnMode();
+void motionLastCommand(float *left, float *right);
 void motionStop();
 
 // Primitivas NO bloqueantes: llamar en cada ciclo; devuelven true al terminar (y frenan).

@@ -71,6 +71,7 @@ socket.on('world', w => {
 });
 // Se sella con el reloj del navegador: el del servidor puede no coincidir
 socket.on('rover_status', s => { roverStatus[s.id] = { ...s, t: Date.now() / 1000 }; });
+socket.on('cerebro', c => { cerebroPlan = c.activo ? c.plan : null; });
 
 setInterval(() => {
   legend();

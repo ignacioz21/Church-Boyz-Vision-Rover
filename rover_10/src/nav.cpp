@@ -184,7 +184,13 @@ static void relax(int from, int to, uint16_t cost) {
     }
 }
 
+static uint32_t plan_count = 0, plan_ms = 0, travel_plans = 0;
+void navPlanStats(uint32_t *count, uint32_t *ms) { *count = plan_count; *ms = plan_ms; }
+uint32_t navTravelPlans() { return travel_plans; }
+void navPlanStatsReset() { plan_count = 0; plan_ms = 0; travel_plans = 0; }
+
 void navPrepare(const TelemetrySnapshot &snap, const Pose &from, CubeColor carried) {
+    uint32_t started_ms = millis();
     buildTable(snap, carried);
     int states = NX * NY * DIRS;
     for (int s = 0; s < states; s++) { g_cost[s] = NONE; parent[s] = NONE; }
@@ -257,6 +263,8 @@ void navPrepare(const TelemetrySnapshot &snap, const Pose &from, CubeColor carri
             relax(s, node * DIRS + nd, 2 * COST_PIVOT_BIN + repel[node] / 2);
         }
     }
+    plan_count++;
+    plan_ms += millis() - started_ms;
 }
 
 bool navStage(Point target, int dir, int steps, Point &stage) {
@@ -278,25 +286,45 @@ static bool have_leg = false;
 static Point leg_target;
 static bool leg_reverse = false;
 static bool leg_moving = false;         // Ya se alineó y empezó a recorrer el tramo
+static Point leg_from;                  // Dónde estaba el robot al empezar el tramo
 static Point planned_goal;
 static int planned_dir = -1;
 static uint32_t blocked_since_ms = 0;
 static int failed_plans = 0;
 
-// Esquinas de la última ruta calculada (solo para mostrarla en el monitor)
-static const int ROUTE_MAX = 12;
-static Point route_pts[ROUTE_MAX];
-static int route_n = 0;
+// La ruta en curso, entera: se calcula una vez y se recorre tramo a tramo
+static NavLeg legs[NAV_MAX_LEGS];
+static int legs_n = 0, leg_at = 0;
+static bool legs_reach_goal = false;    // false si quedó cortada (demasiado larga): al terminarla se recalcula
+static bool legs_external = false;      // La cargó la PC (navSetRoute), no salió de planRoute
+static bool legs_unchecked = false;     // Recién cargada: falta ver si el primer tramo cabe desde acá
+static uint32_t route_ms = 0;
+// Tras un cálculo sin ruta no se reintenta enseguida: cada cálculo deja al rover sordo
+// medio segundo, y lo que estorba (casi siempre el compañero) no se va en un ciclo.
+static uint32_t plan_retry_ms = 0;
+static const uint32_t PLAN_RETRY_MS = 400;
+static const uint32_t ROUTE_MAX_AGE_MS = 12000;     // Una ruta propia más vieja se recalcula en la próxima esquina
+static const float OFF_ROUTE_DIST = 3.0f;           // Apartado del tramo más que esto: recalcular
 
 int navRoute(Point *out, int max) {
-    int n = have_leg ? min(route_n, max) : 0;
-    for (int i = 0; i < n; i++) out[i] = route_pts[i];
+    int n = 0;
+    for (int i = leg_at; have_leg && i < legs_n && n < max; i++) out[n++] = legs[i].to;
+    return n;
+}
+
+int navLegs(NavLeg *out, int max, bool *complete) {
+    int n = min(legs_n, max);
+    for (int i = 0; i < n; i++) out[i] = legs[i];
+    if (complete) *complete = legs_reach_goal && n == legs_n;
     return n;
 }
 
 void navReset() {
     have_leg = false;
-    route_n = 0;
+    legs_n = 0;
+    leg_at = 0;
+    legs_external = false;
+    legs_unchecked = false;
     blocked_since_ms = 0;
     failed_plans = 0;
 }
@@ -304,58 +332,121 @@ void navReset() {
 Point navWaypoint() { return leg_target; }
 bool navHasRoute() { return have_leg; }
 
-// Calcula la ruta y deja en leg_target / leg_reverse su PRIMER tramo recto, que es
-// el que se ejecuta ahora. false si no hay ruta, o si no hay que moverse (at_goal).
-static bool planLeg(const Pose &pose, Point goal, int goal_dir, const TelemetrySnapshot &snap, CubeColor carried, bool &at_goal) {
+// Calcula la ruta y la deja en legs[] como tramos rectos (los pivotes van implícitos
+// entre un tramo y el siguiente). false si no hay ruta, o si no hay que moverse (at_goal).
+static bool planRoute(const Pose &pose, Point goal, int goal_dir, const TelemetrySnapshot &snap, CubeColor carried, bool &at_goal) {
     navPrepare(snap, pose, carried);
     at_goal = false;
+    legs_n = 0;
+    leg_at = 0;
+    legs_external = false;
+    legs_unchecked = false;
     int goal_state = nodeOf(goal) * DIRS + goal_dir;
     if (g_cost[goal_state] == NONE) return false;
 
-    // La ruta se conoce del final hacia el inicio. Solo interesa su comienzo: se
-    // guardan los últimos estados del recorrido hacia atrás (los más cercanos al inicio).
+    // La ruta se conoce del final hacia el inicio. Se guardan los últimos estados del
+    // recorrido hacia atrás (los más cercanos al inicio); una ruta más larga que eso
+    // queda cortada y se completa al llegar a su final.
     static const int KEEP = 64;
     static uint16_t tail[KEEP];
     int length = 0;
     for (int s = goal_state; s != NONE; s = parent[s]) length++;
     int skip = max(0, length - KEEP), n = 0;
+    legs_reach_goal = skip == 0;
     for (int s = goal_state; s != NONE; s = parent[s]) {
         if (skip > 0) { skip--; continue; }
         tail[n++] = (uint16_t)s;
     }
-    // Para el monitor: los puntos donde la ruta cambia de dirección, y el último
-    route_n = 0;
-    int prev_node = tail[n - 1] / DIRS, step_x = 0, step_y = 0;
-    for (int i = n - 2; i >= 0; i--) {
-        int node = tail[i] / DIRS;
-        if (node == prev_node) continue;                    // Pivote: mismo punto
-        int sx = node % NX - prev_node % NX, sy = node / NX - prev_node / NX;
-        if ((sx != step_x || sy != step_y) && (step_x != 0 || step_y != 0) && route_n < ROUTE_MAX - 1)
-            route_pts[route_n++] = pointOf(prev_node);
-        step_x = sx; step_y = sy;
-        prev_node = node;
-    }
-    if (n > 1) route_pts[route_n++] = pointOf(prev_node);
 
-    // tail[n-1] es el estado inicial; se avanza hacia tail[0]
+    // tail[n-1] es el estado inicial; se avanza hacia tail[0]. Un tramo termina en un
+    // pivote o al cambiar entre avanzar y retroceder.
     int end_node = -1, leg_dir = -1;
     bool reverse = false;
     for (int i = n - 1; i > 0; i--) {
         int from = tail[i], to = tail[i - 1];
         int fnode = from / DIRS, tnode = to / DIRS, d = to % DIRS;
-        if (fnode == tnode) {                       // Pivote
-            if (end_node >= 0) break;               // Termina el primer tramo
-            continue;
+        bool pivot = fnode == tnode;
+        bool rev = !pivot && ((tnode % NX - fnode % NX) != DX[d] || (tnode / NX - fnode / NX) != DY[d]);
+        if (end_node >= 0 && (pivot || d != leg_dir || rev != reverse)) {
+            if (legs_n >= NAV_MAX_LEGS) { legs_reach_goal = false; end_node = -1; break; }
+            legs[legs_n++] = { pointOf(end_node), reverse };
+            end_node = -1;
         }
-        bool rev = (tnode % NX - fnode % NX) != DX[d] || (tnode / NX - fnode / NX) != DY[d];
-        if (end_node >= 0 && (d != leg_dir || rev != reverse)) break;
+        if (pivot) continue;
         end_node = tnode;
         leg_dir = d;
         reverse = rev;
     }
-    if (end_node < 0) { at_goal = true; return false; }
-    leg_target = pointOf(end_node);
-    leg_reverse = reverse;
+    if (end_node >= 0) {
+        if (legs_n < NAV_MAX_LEGS) legs[legs_n++] = { pointOf(end_node), reverse };
+        else legs_reach_goal = false;
+    }
+    if (legs_n == 0) { at_goal = true; return false; }
+    route_ms = millis();
+    return true;
+}
+
+bool navPlanRoute(const Pose &pose, Point goal, int dir, const TelemetrySnapshot &snap, CubeColor carried) {
+    bool at_goal;
+    bool ok = planRoute(pose, goal, dir, snap, carried, at_goal);
+    have_leg = false;                   // Solo se calculó: nadie la está siguiendo
+    return ok || at_goal;
+}
+
+void navSetRoute(const NavLeg *in, int n, Point goal, int dir) {
+    navReset();
+    legs_n = min(n, NAV_MAX_LEGS);
+    for (int i = 0; i < legs_n; i++) legs[i] = in[i];
+    if (legs_n == 0) return;
+    legs_reach_goal = n <= NAV_MAX_LEGS;
+    legs_external = true;
+    legs_unchecked = true;
+    planned_goal = goal;
+    planned_dir = dir;
+    have_leg = true;
+    route_ms = millis();
+}
+
+// ¿El tramo recto desde donde está el robot hasta el final del tramo cabe, con la huella
+// real? Es lo que permite pasar al tramo siguiente sin volver a calcular la ruta.
+static bool legClear(const Pose &pose, const NavLeg &leg, const TelemetrySnapshot &snap, CubeColor carried) {
+    float run = dist(pose.p, leg.to);
+    float travel = leg.reverse ? headingTo(leg.to, pose.p) : headingTo(pose.p, leg.to);
+    float sign = leg.reverse ? -1.0f : 1.0f;
+    for (float d = 1.0f; d <= run; d += 1.0f) {
+        if (!poseClear(advance(pose.p, travel, sign * d), travel, snap, carried, STRAIGHT_CUBE_MARGIN)) return false;
+    }
+    return true;
+}
+
+// ¿El compañero anda cerca del tramo que sigue? La ruta se calculó esquivando dónde
+// estaba y hacia dónde iba ENTONCES. Si ahora se mueve cerca, hay que volver a calcular
+// (como se hacía en cada esquina); si está lejos o quieto, la ruta sigue valiendo.
+static const float PEER_REPLAN_DIST = 14.0f;
+static bool peerNearLeg(const Pose &pose, Point to, const TelemetrySnapshot &snap) {
+    if (!snap.peer.detected) return false;
+    Point pc = peerCenter(snap);
+    // Quieto o en movimiento: pasar cerca de él pide una ruta recién calculada
+    if (pointToSegment(pc, pose.p, to) < PEER_REPLAN_DIST) return true;
+    if (geometryPeerStill()) return false;
+    if (!peer_leg_active) return false;
+    // Su tramo anunciado contra el mío
+    float gap = min(min(pointToSegment(pose.p, peer_leg_from, peer_leg_to), pointToSegment(to, peer_leg_from, peer_leg_to)),
+                    min(pointToSegment(peer_leg_from, pose.p, to), pointToSegment(peer_leg_to, pose.p, to)));
+    return gap < PEER_REPLAN_DIST - 3.0f;
+}
+
+// Pone en marcha el tramo leg_at. 'check' = comprobar antes que cabe (false si no).
+// 'mind_peer' = además, que el compañero no ande cerca. No se pide para el primer tramo
+// de una ruta cargada por la PC: los dos arrancan lado a lado, así que siempre está
+// cerca, y la PC ya calculó esa ruta con él ahí.
+static bool startLeg(const Pose &pose, const TelemetrySnapshot &snap, CubeColor carried, bool check, bool mind_peer = true) {
+    if (check && ((mind_peer && peerNearLeg(pose, legs[leg_at].to, snap)) || !legClear(pose, legs[leg_at], snap, carried))) return false;
+    leg_target = legs[leg_at].to;
+    leg_reverse = legs[leg_at].reverse;
+    leg_from = pose.p;
+    leg_moving = false;
+    blocked_since_ms = 0;
     return true;
 }
 
@@ -370,16 +461,25 @@ NavStatus navGo(const Pose &pose, Point goal, int goal_dir, const TelemetrySnaps
         failed_plans = 0;
         return NAV_ARRIVED;
     }
+    // Ruta cargada de antemano: vale si desde acá se puede entrar a su primer tramo
+    if (have_leg && legs_unchecked && !goal_changed) {
+        legs_unchecked = false;
+        if (!startLeg(pose, snap, carried, true, false)) have_leg = false;
+    }
     if (!have_leg || goal_changed) {
         motionStop();
+        if (millis() < plan_retry_ms) return NAV_RUNNING;
         planned_goal = goal;
         planned_dir = goal_dir;
         bool at_goal;
-        have_leg = planLeg(pose, goal, goal_dir, snap, carried, at_goal);
-        leg_moving = false;
+        travel_plans++;
+        have_leg = planRoute(pose, goal, goal_dir, snap, carried, at_goal);
         if (at_goal) { failed_plans = 0; return NAV_ARRIVED; }
-        if (!have_leg) return ++failed_plans > 3 ? NAV_NO_PATH : NAV_RUNNING;
-        blocked_since_ms = 0;
+        if (!have_leg) {
+            plan_retry_ms = millis() + PLAN_RETRY_MS;
+            return ++failed_plans > 3 ? NAV_NO_PATH : NAV_RUNNING;
+        }
+        startLeg(pose, snap, carried, false);
     }
 
     // Rumbo que debe tener el robot para recorrer el tramo (al retroceder, mira en contra)
@@ -391,11 +491,35 @@ NavStatus navGo(const Pose &pose, Point goal, int goal_dir, const TelemetrySnaps
     // ("Se pasó" solo vale si ya venía avanzando: un tramo que empieza con un giro
     // grande tiene el objetivo "detrás" sin haberse movido.)
     if (d < 0.9f || (leg_moving && d < 2.5f && fabsf(err) > 90.0f)) {
+        failed_plans = 0;
+#if FOLLOW_FULL_ROUTE
+        bool last = leg_at + 1 >= legs_n;
+        // Fin de la ruta, sobre la meta: llegó (sin calcular otra vez para enterarse)
+        if (last && legs_reach_goal && d < 0.9f) {
+            motionStop();
+            have_leg = false;
+            return NAV_ARRIVED;
+        }
+        // Queda ruta: al tramo siguiente sin frenar a pensar, si sigue cabiendo
+        bool current = legs_external || millis() - route_ms < ROUTE_MAX_AGE_MS;
+        if (!last && current) {
+            leg_at++;
+            if (startLeg(pose, snap, carried, true)) return NAV_RUNNING;
+        }
+#endif
         motionStop();
         have_leg = false;
-        failed_plans = 0;
         return NAV_RUNNING;
     }
+#if FOLLOW_FULL_ROUTE
+    // Muy apartado del tramo (lo empujaron, o la pose saltó): la ruta ya no describe
+    // dónde está el robot. Las correcciones chicas las hace el timón, más abajo.
+    if (leg_at > 0 && pointToSegment(pose.p, leg_from, leg_target) > OFF_ROUTE_DIST) {
+        motionStop();
+        have_leg = false;
+        return NAV_RUNNING;
+    }
+#endif
 
     static bool turning = false;
     static uint32_t turning_since_ms = 0;
@@ -429,7 +553,11 @@ NavStatus navGo(const Pose &pose, Point goal, int goal_dir, const TelemetrySnaps
     blocked_since_ms = 0;
 
     leg_moving = true;
-    float power = constrain(POWER_MIN_MOVE + d * 0.04f, POWER_MIN_MOVE, POWER_CRUISE);
+    // Con cubo se frena de lejos (un frenazo lo despega de las pinzas), y cerca del
+    // compañero también (hay que poder parar a tiempo); en campo libre, más tarde
+    bool near_peer = snap.peer.detected && dist(pose.p, peerCenter(snap)) < PEER_SLOW_DIST;
+    float brake = carried == COLOR_UNKNOWN && !near_peer ? NAV_BRAKE_GAIN : 0.04f;
+    float power = constrain(POWER_MIN_MOVE + d * brake, POWER_MIN_MOVE, motionCruise());
     power = max(POWER_MIN_MOVE, power * cosf(err * (float)M_PI / 180.0f));
     float steer = constrain(err * 0.010f, -0.20f, 0.20f);
     if (leg_reverse) motionDrive(-power - steer, -power + steer);

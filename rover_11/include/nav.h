@@ -33,9 +33,27 @@ bool navStage(Point target, int dir, int steps, Point &stage);
 // Negativo si no se puede.
 float navCost(Point goal, int dir);
 
-// Lleva al robot hasta ese punto para quedar con ese rumbo. Llamar en cada ciclo;
-// replanifica sola al terminar cada tramo o si algo se cruza.
+// Un tramo recto de una ruta: hasta dónde, y si se recorre marcha atrás
+struct NavLeg { Point to; bool reverse; };
+#define NAV_MAX_LEGS 12
+
+// Lleva al robot hasta ese punto para quedar con ese rumbo. Llamar en cada ciclo.
+// Calcula la ruta entera una vez y la sigue tramo a tramo sin volver a calcular; solo
+// replanifica si algo se cruzó, si se desvió o si el tramo siguiente ya no cabe.
 NavStatus navGo(const Pose &pose, Point goal, int dir, const TelemetrySnapshot &snap, CubeColor carried);
+
+// Carga una ruta ya hecha (la que calculó la PC antes de READY) hacia 'goal' con rumbo
+// 'dir'. El siguiente navGo con esa misma meta la sigue en vez de calcular una; si el
+// primer tramo no cabe desde donde está el robot, la descarta y planifica a bordo.
+void navSetRoute(const NavLeg *legs, int n, Point goal, int dir);
+
+// Copia la ruta calculada por el último navGo / navPlanRoute (todos sus tramos).
+// Devuelve cuántos; 'complete' = llega hasta la meta (no quedó cortada por larga).
+int navLegs(NavLeg *out, int max, bool *complete);
+
+// Calcula la ruta de 'pose' a 'goal' sin mover el robot (para planificar por adelantado).
+// false si no hay ruta. Si ya está en la meta devuelve true con cero tramos.
+bool navPlanRoute(const Pose &pose, Point goal, int dir, const TelemetrySnapshot &snap, CubeColor carried);
 
 // Tramo que el compañero está recorriendo ahora (de 'from' a 'to'). Mientras esté
 // activo, las rutas lo evitan entero y no solo su posición actual. Lo usa el rover
@@ -49,6 +67,13 @@ Point navWaypoint();
 bool navHasRoute();
 
 void navReset();
+
+// Cuántas veces se calculó una ruta y cuántos ms se fueron en eso (desde el último reset
+// de estas cuentas). Mientras calcula, el rover está quieto y sordo: es tiempo muerto.
+void navPlanStats(uint32_t *count, uint32_t *ms);
+void navPlanStatsReset();
+// De esos cálculos, cuántos se hicieron EN VIAJE (parado a mitad de camino)
+uint32_t navTravelPlans();
 
 // Ruta en curso, resumida en sus esquinas (para el monitor). Devuelve cuántos puntos copió.
 int navRoute(Point *out, int max);

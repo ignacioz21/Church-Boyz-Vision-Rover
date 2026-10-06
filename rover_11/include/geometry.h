@@ -16,6 +16,9 @@ bool inField(Point p, const TelemetrySnapshot &snap);
 // Cuánto le falta al cubo para estar COMPLETAMENTE dentro de su zona (celdas).
 // 0 = entregado. Regla oficial: CONTRATO.md §3 "Cuándo un cubo está en su zona".
 float cubeExcess(Point cube, CubeColor color, const TelemetrySnapshot &snap);
+// Lo contrario: cuánto le SOBRA al cubo hasta el límite de su zona, en celdas (lo que
+// podría correrse en la peor dirección y seguir contando). Negativo si está afuera.
+float cubeMargin(Point cube, CubeColor color, const TelemetrySnapshot &snap);
 
 // Punto detrás del cubo sobre la recta zona->cubo, a 'd' del centro del cubo
 Point approachPoint(Point cube, Point depot, float d);

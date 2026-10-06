@@ -62,9 +62,29 @@ static bool imuReadZ(float &dps) {
     return true;
 }
 
-static void imuInit() {
-    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL);
-    Wire.setTimeOut(20);
+// Si la placa se reinició en medio de una lectura, el sensor puede quedar sujetando la
+// línea de datos y el bus no arranca más. Nueve pulsos de reloj a mano lo sueltan.
+static void i2cFreeBus() {
+    pinMode(PIN_I2C_SDA, INPUT_PULLUP);
+    pinMode(PIN_I2C_SCL, OUTPUT_OPEN_DRAIN);
+    digitalWrite(PIN_I2C_SCL, HIGH);
+    for (int i = 0; i < 9 && digitalRead(PIN_I2C_SDA) == LOW; i++) {
+        digitalWrite(PIN_I2C_SCL, LOW);
+        delayMicroseconds(10);
+        digitalWrite(PIN_I2C_SCL, HIGH);
+        delayMicroseconds(10);
+    }
+    pinMode(PIN_I2C_SCL, INPUT_PULLUP);
+}
+
+void hardwareImuInit() {
+#if !USE_GYRO
+    Serial.println("[IMU] Giroscopio desactivado en config.h (USE_GYRO 0)");
+    return;
+#endif
+    i2cFreeBus();
+    Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL, 100000);
+    Wire.setTimeOut(10);
     for (uint8_t addr : { (uint8_t)0x6B, (uint8_t)0x6A }) {
         Wire.beginTransmission(addr);
         Wire.write(0x0F);                           // WHO_AM_I
@@ -98,16 +118,35 @@ void gyroRezero() {
     if (imu_ok && imuReadZ(z)) gyro_bias_dps += 0.08f * (z - gyro_bias_dps);
 }
 
+// El giroscopio se LEE como mucho una vez cada 8 ms; entre medio se devuelve el último
+// valor. En un ciclo lo piden varias partes del programa, y cada lectura es tráfico por
+// un bus que pasa al lado de los motores: cuanto menos, mejor. Si empieza a fallar, se
+// apaga por el resto del encendido en vez de insistir (se sigue sin giroscopio).
+static float gyro_last_dps = 0.0f;
+static uint32_t gyro_read_ms = 0;
+static uint16_t gyro_fail_total = 0;
+
 float gyroZDps() {
     if (!imu_ok) return 0.0f;
+    uint32_t now = millis();
+    if (gyro_read_ms != 0 && now - gyro_read_ms < 8) return gyro_last_dps;
+    gyro_read_ms = now;
     float z;
     if (!imuReadZ(z)) {
-        if (++imu_errors > 25) { imu_ok = false; Serial.println("[IMU] Dejo de responder"); }
-        return 0.0f;
+        gyro_fail_total++;
+        if (++imu_errors > 5) {
+            imu_ok = false;
+            Wire.end();
+            Serial.println("[IMU] Lecturas fallidas: giroscopio apagado hasta el proximo encendido");
+        }
+        return gyro_last_dps;
     }
     imu_errors = 0;
-    return z - gyro_bias_dps;
+    gyro_last_dps = z - gyro_bias_dps;
+    return gyro_last_dps;
 }
+
+uint16_t gyroFailures() { return gyro_fail_total; }
 
 // --- Arranque suave de los motores -----------------------------------------------------
 // Arrancar los dos motores de golpe, o invertir uno que todavía gira, pide un pico de
@@ -180,7 +219,6 @@ void hardwareInit() {
     pinMode(PIN_IR_RR, INPUT);
 
     setLedColor(0, 0, 0);
-    imuInit();
 }
 
 void setMotors(float left, float right) {

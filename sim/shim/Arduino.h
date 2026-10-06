@@ -26,6 +26,7 @@ public:
     char charAt(int i) const { return (i >= 0 && i < (int)s.size()) ? s[i] : 0; }
     int indexOf(char c, int from = 0) const { auto p = s.find(c, from); return p == std::string::npos ? -1 : (int)p; }
     int indexOf(const String &t, int from = 0) const { auto p = s.find(t.s, from); return p == std::string::npos ? -1 : (int)p; }
+    int lastIndexOf(const String &t) const { auto p = s.rfind(t.s); return p == std::string::npos ? -1 : (int)p; }
     String substring(int a, int b = -1) const { return String(b < 0 ? s.substr(a) : s.substr(a, b - a)); }
     long toInt() const { return atol(s.c_str()); }
     float toFloat() const { return (float)atof(s.c_str()); }

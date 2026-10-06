@@ -47,6 +47,27 @@ static uint32_t crumb_previous = 0;         // Lo que dejó el arranque anterior
 #define CRUMB_MAGIC 0xC0FFEE10u
 static inline void crumb(uint32_t where) { crumb_now = where; }
 
+// Plan B si la placa se reinicia sola en plena ronda (cuelgue, fallo o bajón de
+// voltaje): al volver a arrancar retoma por su cuenta, sin que nadie la toque.
+//   - En una ronda oficial no hace falta guardar nada: la fase READY/RUNNING llega por
+//     la telemetría y la estrategia arranca sola, igual que al principio.
+//   - En una práctica, la orden de "iniciar" se guarda acá (memoria que sobrevive al
+//     reinicio) para que la práctica siga.
+// Lo que se pierde es la memoria de la ronda (intentos por cubo, capturas vetadas): la
+// estrategia vuelve a mirar la cancha y sigue con lo que falte.
+RTC_NOINIT_ATTR static uint32_t resume_practice;       // CRUMB_MAGIC = había una práctica en curso
+RTC_NOINIT_ATTR static uint32_t resume_count;          // Veces que retomó desde que se encendió
+RTC_NOINIT_ATTR static uint32_t reset_streak;          // Reinicios solos SEGUIDOS (se borra tras un rato andando bien)
+static bool resumed_this_boot = false;
+// El plan de la PC (con sus rutas) también sobrevive a un reinicio: se guarda el mensaje
+// tal como llegó y se vuelve a cargar al arrancar. Lo que ya no sirva lo descarta la
+// estrategia sola (cada ruta se comprueba contra la cancha antes de usarla).
+#define PLAN_MSG_MAX 1024
+RTC_NOINIT_ATTR static char plan_saved[PLAN_MSG_MAX];
+RTC_NOINIT_ATTR static uint32_t plan_saved_magic;
+static bool gyro_skipped = false;                      // Este arranque fue sin giroscopio por los reinicios
+#define STREAK_CLEAR_MS 30000
+
 static const char* resetName() {
     switch (esp_reset_reason()) {
         case ESP_RST_POWERON:  return "encendido";
@@ -73,6 +94,7 @@ static const char* phaseName(CompetitionPhase p) {
 static void stopAll() {
     test_until_ms = 0;
     practice_run = false;
+    resume_practice = 0;                // Parada pedida: no hay nada que retomar
     goto_active = false;
     motionStop();
 }
@@ -91,13 +113,25 @@ static void handleCommand(String cmd) {
         if (strategy_running) {
             Serial.println("[PLAN] Ignorado: la ronda ya esta en curso");
         } else if (planLoad(cmd)) {
-            Serial.printf("[PLAN] Cargado: %s\n", cmd.c_str());
+            if (cmd.length() < PLAN_MSG_MAX) {
+                strcpy(plan_saved, cmd.c_str());
+                plan_saved_magic = CRUMB_MAGIC;
+            }
+            Serial.printf("[PLAN] Cargado (%d rutas): %s\n", planRouteCount(), cmd.c_str());
         } else {
             Serial.printf("[PLAN] Mal formado: %s\n", cmd.c_str());
+        }
+    } else if (c == 'V' && a > 0 && b > a) {    // Velocidad: "V,crucero,tope" (solo antes de la ronda)
+        if (strategy_running) {
+            Serial.println("[VEL] Ignorado: la ronda ya esta en curso");
+        } else {
+            motionSetSpeed(cmd.substring(a + 1, b).toFloat(), cmd.substring(b + 1).toFloat());
+            Serial.printf("[VEL] Crucero %.2f, tope %.1f celdas/s\n", motionCruise(), motionMaxSpeed());
         }
     } else if (c == 'S') {                      // Práctica: correr la estrategia ya
         stopAll();
         practice_run = true;
+        resume_practice = CRUMB_MAGIC;
         Serial.println("[CMD] Practica: estrategia iniciada");
     } else if (c == 'G' && a > 0 && b > a) {    // Práctica: "G,col,row"
         stopAll();
@@ -122,7 +156,7 @@ static void handleCommand(String cmd) {
         setMotors(cmd.substring(a + 1, b).toFloat(), cmd.substring(b + 1).toFloat());
         test_until_ms = millis() + TEST_CMD_TIMEOUT_MS;
     } else {
-        Serial.printf("[CMD] Desconocido: %s  (r | P | S | G,col,row | L | f | A | A,r | M,izq,der)\n", cmd.c_str());
+        Serial.printf("[CMD] Desconocido: %s  (r | P | V,crucero,tope | S | G,col,row | L | f | A | A,r | M,izq,der)\n", cmd.c_str());
     }
 }
 
@@ -143,13 +177,17 @@ static void sendStatus(const TelemetrySnapshot &snap, bool fresh, const char* st
     for (int i = 0; i < route_n && used < (int)sizeof(route_txt) - 16; i++) {
         used += snprintf(route_txt + used, sizeof(route_txt) - used, "%s[%.1f,%.1f]", i ? "," : "", route[i].col, route[i].row);
     }
-    char line[820];
+    uint32_t plan_n = 0, plan_ms = 0;
+    navPlanStats(&plan_n, &plan_ms);
+    float mot_l = 0.0f, mot_r = 0.0f;
+    motionLastCommand(&mot_l, &mot_r);
+    char line[960];
     snprintf(line, sizeof(line),
              "{\"id\":%d,\"state\":\"%s\",\"fresh\":%s,\"link\":%s,\"phase\":\"%s\","
              "\"col\":%.2f,\"row\":%.2f,\"theta\":%.1f,\"seq\":%u,"
              "\"plan\":%d,\"task\":\"%c\",\"gc\":%.1f,\"gr\":%.1f,"
              "\"lat\":%.0f,\"vg\":%.1f,\"wg\":%.0f,"
-             "\"peer\":%s,\"st\":[%d,%d,%d,%d,%d],\"rst\":\"%s\",\"up\":%lu,\"imu\":%s,\"gz\":%.0f,\"ob\":%u,\"obp\":[%.1f,%.1f],\"trim\":[%.2f,%.2f],\"crumb\":%u,\"stk\":%u,\"route\":[%s]}",
+             "\"peer\":%s,\"st\":[%d,%d,%d,%d,%d],\"rst\":\"%s\",\"up\":%lu,\"imu\":%s,\"gz\":%.0f,\"ob\":%u,\"obp\":[%.1f,%.1f],\"trim\":[%.2f,%.2f],\"crumb\":%u,\"stk\":%u,\"fw\":\"" FW_VERSION "\",\"res\":%u,\"gf\":%u,\"rt\":%d,\"np\":[%u,%u],\"spd\":[%.2f,%.1f],\"gs\":%d,\"tm\":%d,\"as\":%d,\"mot\":[%.2f,%.2f],\"route\":[%s]}",
              ROVER_ID, state, fresh ? "true" : "false", snap.is_connected ? "true" : "false",
              phaseName(snap.phase), snap.me.col, snap.me.row, snap.me.theta, (unsigned)snap.seq,
              planLoadedId(), target == COLOR_UNKNOWN ? '-' : COLOR_CHAR[target], goal.col, goal.row,
@@ -159,7 +197,9 @@ static void sendStatus(const TelemetrySnapshot &snap, bool fresh, const char* st
              imuReady() ? "true" : "false", gyroZDps(), (unsigned)motionObstacleCount(),
              motionObstaclePoint().col, motionObstaclePoint().row,
              motionPivotTrim(), motionFineTrim(),
-             (unsigned)crumb_previous, (unsigned)uxTaskGetStackHighWaterMark(NULL), route_txt);
+             (unsigned)crumb_previous, (unsigned)uxTaskGetStackHighWaterMark(NULL), (unsigned)resume_count, (unsigned)gyroFailures(),
+             planRouteCount(), (unsigned)plan_n, (unsigned)plan_ms, motionCruise(), motionMaxSpeed(), gyro_skipped ? 1 : 0,
+             motionTurnMode(), strategy_running && strategySeating() ? 1 : 0, mot_l, mot_r, route_txt);
     commsSend(line);
 }
 
@@ -180,17 +220,50 @@ void setup() {
     Serial.begin(115200);
     delay(300);
     crumb_previous = (crumb_magic == CRUMB_MAGIC && esp_reset_reason() != ESP_RST_POWERON) ? crumb_now : 0;
+    // ¿Arranque normal (alguien lo encendió) o la placa se reinició sola?
+    esp_reset_reason_t why = esp_reset_reason();
+    bool self_reset = crumb_magic == CRUMB_MAGIC &&
+                      (why == ESP_RST_PANIC || why == ESP_RST_INT_WDT || why == ESP_RST_TASK_WDT ||
+                       why == ESP_RST_WDT || why == ESP_RST_BROWNOUT);
+    if (!self_reset) {
+        resume_practice = 0;
+        resume_count = 0;
+        reset_streak = 0;
+        plan_saved_magic = 0;
+    } else {
+        resume_count++;
+        reset_streak++;
+        resumed_this_boot = true;
+        if (resume_practice == CRUMB_MAGIC) practice_run = true;       // La práctica sigue
+    }
     crumb_magic = CRUMB_MAGIC;
-    crumb(1);
+    crumb(1);                               // Arranque: motores y sensores
     Serial.printf("\n=== ROVER %d === (arranque: %s, antes estaba en %u)\n", ROVER_ID, resetName(), (unsigned)crumb_previous);
     hardwareInit();
+    // Los cuelgues vistos vienen del bus del giroscopio. Si la placa se colgó justo al
+    // arrancarlo, o ya van dos reinicios seguidos, este arranque va sin giroscopio: mejor
+    // apuntar un poco peor que quedarse reiniciando.
+    gyro_skipped = self_reset && (reset_streak >= 2 || crumb_previous == 2);
+    crumb(2);                               // Arranque: giroscopio
+    if (gyro_skipped) Serial.println("[IMU] Salteado: la placa viene de reiniciarse sola");
+    else hardwareImuInit();
+    crumb(3);                               // Arranque: red y telemetria
     telemetryInit();
+    crumb(4);
+    if (self_reset && plan_saved_magic == CRUMB_MAGIC) {
+        plan_saved[PLAN_MSG_MAX - 1] = '\0';
+        if (planLoad(String(plan_saved))) Serial.printf("[PLAN B] Plan %d recuperado tras el reinicio\n", planLoadedId());
+    }
     strategyReset();
     strategySetKeepAlive(statusKeepAlive);
+    if (resumed_this_boot)
+        Serial.printf("[PLAN B] La placa se reinicio sola (%s). %s\n", resetName(),
+                      practice_run ? "Retomo la practica." : "Si hay ronda en curso, la retomo al recibir la fase.");
 }
 
 void loop() {
     crumb(10);                              // Inicio del ciclo
+    if (reset_streak != 0 && millis() > STREAK_CLEAR_MS) reset_streak = 0;     // Ya anda bien
     TelemetrySnapshot snap;
     telemetryGetSnapshot(snap);
     bool fresh = isTelemetryFresh();
@@ -215,6 +288,7 @@ void loop() {
         // Lo que se estuviera probando al llegar READY se corta: la ronda manda
         if (test_until_ms > 0 || goto_active) { test_until_ms = 0; goto_active = false; motionStop(); }
         practice_run = false;       // Y termina cuando la visión lo diga, no antes ni después
+        resume_practice = 0;
     } else {
         if (got_serial) handleCommand(serial_cmd);
         if (got_udp) handleCommand(cmd);
@@ -239,6 +313,7 @@ void loop() {
         // 4. Competencia: la estrategia corre a bordo
         if (!strategy_running) {
             strategyReset();
+            navPlanStatsReset();
             strategy_running = true;
         }
         if (!fresh) {

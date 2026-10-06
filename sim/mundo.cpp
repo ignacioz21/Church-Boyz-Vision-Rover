@@ -478,7 +478,12 @@ int main(int argc, char **argv) {
     printf("Semilla %d (%s) | plan %s | %zu rover(s) | cubos: R(%.1f,%.1f) G(%.1f,%.1f) B(%.1f,%.1f)\n", seed, layout_name,
            plan.c_str(), robots.size(), cubes[0].col, cubes[0].row, cubes[1].col, cubes[1].row, cubes[2].col, cubes[2].row);
 
-    for (Robot &r : robots) r.reset(now_ms, no_plan ? "" : plan.c_str());
+    // SIM_PLAN_10 / SIM_PLAN_11: plan propio de cada rover (el de la fase CEREBRO trae las
+    // rutas de ESE rover, así que no es el mismo mensaje para los dos)
+    for (Robot &r : robots) {
+        const char *own = getenv(("SIM_PLAN_" + std::to_string(r.id)).c_str());
+        r.reset(now_ms, own ? own : (no_plan ? "" : plan.c_str()));
+    }
 
     // Momento en que cada cubo quedó en su zona (y no volvió a salir)
     Point cubes0[NUM_COLORS];

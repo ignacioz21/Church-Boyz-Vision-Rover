@@ -5,6 +5,72 @@ const ROVER_COLORS = { 10:'#d97706', 11:'#7c3aed' };
 // Huella del robot en celdas, medida desde el marcador (ver rover_*/include/config.h)
 const AXLE = 1.8, REAR = 1.9, FRONT = 4.9, HALF = 3.25, TIP = 7.8, PRONG = 2.9;
 
+// Disposición de práctica generada en el cerebro (null = ninguna). La fija index.html.
+let shadowLayout = null;
+const PLACED_CUBE = 1.0, PLACED_ROVER = 2.5;       // Celdas: qué tan cerca cuenta como "en su lugar"
+
+// Dibuja las sombras: dónde poner cada cubo y cada rover. Devuelve cuántos hay en su lugar.
+function drawShadows(ctx, w, s) {
+  if (!shadowLayout) return null;
+  const X = c => c * s, Y = r => r * s, half = w.cube_side / 2;
+  const state = { cubes: {}, rovers: {}, ready: true };
+  ctx.save();
+  ctx.lineWidth = 2.5;
+  for (const [color, p] of Object.entries(shadowLayout.cubos)) {
+    const real = w.cubes.find(c => c.color === color);
+    const ok = !!real && Math.hypot(real.col - p[0], real.row - p[1]) <= PLACED_CUBE;
+    state.cubes[color] = ok; state.ready = state.ready && ok;
+    ctx.setLineDash(ok ? [] : [6, 5]);
+    ctx.strokeStyle = COLORS[color]; ctx.fillStyle = COLORS[color] + (ok ? '00' : '2a');
+    ctx.fillRect(X(p[0] - half), Y(p[1] - half), w.cube_side * s, w.cube_side * s);
+    ctx.strokeRect(X(p[0] - half) - 3, Y(p[1] - half) - 3, w.cube_side * s + 6, w.cube_side * s + 6);
+    if (ok) { ctx.setLineDash([]); ctx.fillStyle = '#15803d'; ctx.font = 'bold 15px system-ui'; ctx.fillText('✓', X(p[0] + half) + 5, Y(p[1] - half) + 4); }
+  }
+  for (const [id, p] of Object.entries(shadowLayout.rovers)) {
+    const real = w.rovers.find(r => String(r.id) === String(id));
+    const ok = !!real && Math.hypot(real.col - p[0], real.row - p[1]) <= PLACED_ROVER;
+    state.rovers[id] = ok; state.ready = state.ready && ok;
+    ctx.setLineDash(ok ? [] : [6, 5]);
+    ctx.strokeStyle = ROVER_COLORS[id] || '#111';
+    ctx.strokeRect(X(p[0] - AXLE - REAR), Y(p[1] - HALF), (REAR + FRONT) * s, 2 * HALF * s);
+    ctx.setLineDash([]); ctx.fillStyle = ctx.strokeStyle; ctx.font = '12px system-ui';
+    ctx.fillText(ok ? id + ' ✓' : id, X(p[0] - AXLE - REAR), Y(p[1] - HALF) - 4);
+  }
+  ctx.restore();
+  return state;
+}
+
+// Plan de la fase CEREBRO (null = ninguno): lo que la PC calculó y cargó antes de arrancar.
+// Lo fija la página con el evento 'cerebro'.
+let cerebroPlan = null;
+
+// Dibuja las rutas planificadas: línea llena para el primer cubo de cada rover y
+// punteada para el comodín (el que toma quien quede libre primero).
+function drawPlanned(ctx, w, s, resting) {
+  if (!cerebroPlan || !cerebroPlan.dibujo) return;
+  const X = c => c * s, Y = r => r * s;
+  ctx.save();
+  for (const [id, routes] of Object.entries(cerebroPlan.dibujo)) {
+    if (!resting(Number(id))) continue;             // Ya en marcha: vale la ruta que reporta el rover
+    routes.forEach((route, i) => {
+      ctx.strokeStyle = ROVER_COLORS[id] || '#111';
+      ctx.globalAlpha = i === 0 ? 0.9 : 0.5;
+      ctx.lineWidth = i === 0 ? 3 : 2;
+      ctx.setLineDash(route.comodin ? [3, 6] : []);
+      ctx.beginPath();
+      route.puntos.forEach((p, k) => k ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1])));
+      ctx.stroke();
+      // Dónde toma el cubo: un aro del color del cubo
+      const cube = w.cubes.find(c => c.color === route.color);
+      if (cube) {
+        ctx.setLineDash([]); ctx.lineWidth = 2; ctx.strokeStyle = ROVER_COLORS[id] || '#111';
+        ctx.beginPath(); ctx.arc(X(cube.col), Y(cube.row), (2.6 + 0.5 * i) * s, 0, 7); ctx.stroke();
+      }
+    });
+  }
+  ctx.restore();
+}
+
 // Lugares donde cada rover avisó de un giro trabado (se acumulan mientras la página esté abierta)
 const obstacleMarks = {};
 
@@ -38,6 +104,9 @@ function drawRoutesMap(cv, w, online) {
     ctx.fillRect(X(c.col - half), Y(c.row - half), w.cube_side*s, w.cube_side*s);
   }
   ctx.globalAlpha = 1;
+
+  drawShadows(ctx, w, s);
+  drawPlanned(ctx, w, s, id => { const st = online(id); return st && (st.state === 'IDLE' || st.state === 'FINISHED'); });
 
   // Rutas, debajo de los rovers
   for (const r of w.rovers) {

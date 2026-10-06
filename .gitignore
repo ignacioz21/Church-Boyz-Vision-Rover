@@ -9,3 +9,9 @@ sim/resultados.jsonl
 
 # Rondas grabadas por el cerebro
 cerebro/registros/
+
+# Episodios y modelo ajustados con las grabaciones (se regeneran)
+cerebro/datos/
+
+# Último ajuste de cámara elegido en el dashboard
+cerebro/camara.txt

@@ -54,6 +54,17 @@ float cubeExcess(Point cube, CubeColor color, const TelemetrySnapshot &snap) {
     return hypotf(ex_col, ex_row);
 }
 
+float cubeMargin(Point cube, CubeColor color, const TelemetrySnapshot &snap) {
+    Point depot = snap.depots[color];
+    float to_horizontal = min(depot.row, snap.grid_rows - depot.row);
+    float to_vertical = min(depot.col, snap.grid_cols - depot.col);
+    bool on_top_or_bottom = to_horizontal <= to_vertical;
+    float semi_col = (on_top_or_bottom ? snap.depot_length : snap.depot_depth) / 2.0f;
+    float semi_row = (on_top_or_bottom ? snap.depot_depth : snap.depot_length) / 2.0f;
+    float margin = snap.cube_side * M_SQRT2 / 2.0f;
+    return min((semi_col - margin) - fabsf(cube.col - depot.col), (semi_row - margin) - fabsf(cube.row - depot.row));
+}
+
 Point approachPoint(Point cube, Point depot, float d) {
     float len = dist(depot, cube);
     Point out = cube;

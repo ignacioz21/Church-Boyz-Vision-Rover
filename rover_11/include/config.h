@@ -10,6 +10,11 @@
 #define ROVER_ID                11          // ID ArUco de ESTE robot
 #define ROVER_PEER_ID           10          // ID ArUco del compañero
 
+// Versión del firmware: va en el reporte de estado y queda en la ficha de cada ronda
+// grabada. Cambiarla cada vez que cambie el comportamiento, para poder separar las
+// rondas hechas con una versión de las hechas con otra.
+#define FW_VERSION              "1006e"
+
 // =============================================================================
 // 2. RED
 // =============================================================================
@@ -66,6 +71,10 @@
 
 #define PIN_NEOPIXEL            2
 
+// 1 = usar el giroscopio. 0 = no tocar el bus I2C para nada (el rumbo se estima como
+// antes, por la potencia mandada, y el ajuste fino va a toquecitos). Sirve para
+// comprobar si los reinicios "colgado" vienen del giroscopio.
+#define USE_GYRO                1
 #define PIN_I2C_SDA             21      // Giroscopio integrado (LSM6DS3TR-C)
 #define PIN_I2C_SCL             22
 
@@ -90,16 +99,21 @@
 
 #define POWER_MIN_MOVE          0.22f   // Mínimo que vence la fricción avanzando
 #define POWER_MIN_PIVOT         0.30f   // Mínimo que vence la fricción pivotando
+#define POWER_PIVOT_CARRY       0.42f   // Propio de ESTE robot: potencia base al girar con un cubo en las pinzas (medido 6-oct: el 11 con 0.30-0.36 gira a 3-5 grados/s)
 #define POWER_MAX_PIVOT         0.45f
 #define POWER_CRUISE            0.50f
 #define POWER_PUSH              0.35f
 #define MAX_SPEED               10.0f   // celdas/s: tope de avance (más rápido, la cámara pierde el marcador)
+#define NAV_BRAKE_GAIN          0.07f   // Sin cubo: potencia por celda que falta (0.04 = frena desde 7 celdas; 0.07 = desde 4)
+#define PEER_SLOW_DIST          16.0f   // Con el compañero a menos de esto se viaja y se toma el cubo como antes (frenando de lejos)
+#define CAPTURE_FAST_POWER      0.40f   // Yendo al cubo desde lejos; cerca baja sola a la de contacto
+#define CAPTURE_SLOW_DIST       3.5f    // Con las puntas a menos de esto del cubo, ya va a potencia de contacto
 #define PULSE_MIN_MS            90.0f   // Pulso más corto de ajuste fino de rumbo (se acorta solo si el robot se pasa)
 
 // Giro trabado (algo en el piso frena al robot): se detecta con el giroscopio
 // Regulación de la velocidad de giro con el giroscopio (motion.cpp, pivotRegulate)
 #define PIVOT_RATE_CARRY        45.0f   // grados/s que se buscan al girar con un cubo en las pinzas
-#define PIVOT_TRIM_GAIN         0.008f  // Qué tan rápido se corrige la potencia (por grado/s de error y por segundo)
+#define PIVOT_TRIM_GAIN         0.020f  // Qué tan rápido se corrige la potencia (por grado/s de error y por segundo)
 #define PIVOT_TRIM_MAX          0.35f   // Tope de potencia extra
 // Ajuste fino del rumbo con giroscopio (motion.cpp, motionTurnTo): giro continuo y suave
 #define FINE_POWER              0.24f   // Potencia base de un retoque SIN cubo (menos que un giro normal)
@@ -133,12 +147,23 @@
 // al menos a esta distancia, para que las puntas (FP_PRONG_TIP) no alcancen el
 // cubo mientras se afina la puntería.
 #define STAGE_DIST_MIN          11.0f
+#define USE_PC_ROUTES           1       // 1 = usa las capturas y rutas que la PC carga antes de READY (fase CEREBRO); 0 = las ignora y planifica todo a bordo
+#define FOLLOW_FULL_ROUTE       1       // 1 = sigue la ruta entera sin recalcular en cada esquina; 0 = como antes (recalcula tramo a tramo)
 #define NAV_ARRIVE_DIST         1.5f    // Con cubo: eje a menos de esto del destino de una ruta => llegó
 // Tramo final de una entrega (recto hacia el centro de la zona): corrección máxima
 // de rumbo, como diferencia de potencia entre ruedas.
 #define CARRY_STEER_MAX         0.16f
 #define TURN_WITH_CUBE_COST     0.20f   // Celdas de recorrido que "cuesta" cada grado a girar con el cubo (al elegir por dónde tomarlo)
+// Dejar el cubo en el CENTRO de su zona. El margen es chico: el centro del cubo solo
+// puede apartarse 1,63 celdas del centro de la zona en el sentido del fondo.
+#define DROP_DEPTH_TOL 0.4f    // Se sigue empujando mientras le falte más que esto para el centro
+#define DROP_MAX_NUDGES 8       // Empujones cortos, cada uno confirmado con la cámara
+#define DROP_SIDE_TOL           1.0f    // Desviado de costado más que esto (y aún lejos): volver a apuntar
+#define DROP_SAFE_MARGIN 0.8f    // Maniobrando: solo se suelta si al cubo le sobra esto hasta el límite
+#define DROP_MIN_MARGIN         0.4f    // Entregado con menos margen que esto: retoque
+#define DROP_RETOUCH 1       // 0 = sin retoque (si en la práctica cuesta más de lo que protege)
 #define DIRECT_MAX_TURN         110.0f   // Con el cubo: si el destino queda a menos de este giro y el tramo está libre, ir derecho
+#define DROP_AIM_OFFSET         0.5f    // Al apuntar a la zona con el cubo: desvío admitido, en celdas a la llegada (el timón lo corrige en el camino)
 #define AIM_WITH_CUBE_MS        12000   // Tiempo máximo para apuntar al destino con el cubo; si no lo logra, lo suelta y lo retoma
 #define CAPTURE_SEEN_SLACK      2.6f    // El cubo se da por tomado cuando la cámara (con su atraso) lo ve a menos de esto del frente
 #define SEAT_TOLERANCE          0.6f    // Cubo a más de esto del frente => no está asentado: avanzar antes de girar
@@ -150,6 +175,7 @@
 #define DEPART_GAP              15.0f   // Con el compañero a menos de esto, no salimos los dos a la vez
 #define DEPART_WAIT_MS          6000    // Cuánto espera el de mayor ID a que el otro se aleje
 #define YIELD_DIST              17.0f   // Compañero más cerca que esto y en mi camino => cedo
+#define YIELD_LEG_DIST          12.0f   // ...y a menos de esto del tramo que me queda por recorrer
 #define YIELD_MAX_MS            5000    // Tras esperar esto, se rodea
 #define RETREAT_DIST            7.0f    // Retroceso tras soltar el cubo
 #define PUSH_TIMEOUT_MS         25000

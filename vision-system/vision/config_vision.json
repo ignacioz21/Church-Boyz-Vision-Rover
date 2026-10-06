@@ -228,7 +228,9 @@
   },
   "deteccion_cubos": {
     "_acerca_de": "Detecci\u00f3n de cubos por color (vision/detectors/cubos.py). El tablero es acrom\u00e1tico \u2014grises, blancos, negros\u2014 as\u00ed que todo lo que tenga color saturado es, por definici\u00f3n, un objeto de inter\u00e9s. Ese es el filtro que separa el fondo del contenido casi gratis.",
-    "croma_minimo": 10.0,
+    "croma_minimo": 13.0,
+    "_nota_croma_5oct_b": "Bajado de 18 a 13 el mismo 5-oct-2026, tras medir una ronda real (ronda_20261005_093250): con 18 el VERDE se perdia en el 79 % de los cuadros aun estando suelto, y el AZUL en el 62 % cuando lo llevaba un rover (a la sombra de las pinzas pierde croma); el rojo, nunca. El verde y el azul tienen croma ~28-31 con buena luz y bastante menos a la sombra o cuando baja la luz. 13 es el punto medio: el ruido de color del tablero queda en ~2-3 % de sus pixeles (con 10 era 13,5 % y agrandaba las manchas), y el tope de area ya subio a 1,8 para absorberlo.",
+    "_nota_croma_5oct": "Subido de 10 a 18 el 5-oct-2026, de dia, con exposicion 40. Medido en la imagen real: el tablero (blanco y negro) tiene croma medio 6, pero el 13,5 % de sus pixeles pasa de 10 (ruido de color en los bordes de los cuadros). Ese ruido se pegaba a las manchas de los cubos y las agrandaba por encima del tope de area: el rojo median 2794 px contra un maximo de 2431 y se descartaba. Con 18 el tablero queda en 0 % y las manchas en 2236 (rojo) y 2273 (azul). Los cubos tienen croma 53 (rojo), 31 (azul) y 28 (verde): el verde es el mas justo; si de noche deja de verse el verde, bajar a 14.",
     "_nota_croma": "Croma m\u00ednimo en Lab, `raiz(a*\u00b2 + b*\u00b2)`, para que un p\u00edxel cuente como coloreado. El croma de Lab ES la saturaci\u00f3n en sentido perceptual. Se usa Lab y no HSV para el umbral Y para la clasificaci\u00f3n \u2014un solo espacio\u2014 porque el matiz de HSV se vuelve inestable justo donde m\u00e1s importa: con poca luz o poca saturaci\u00f3n da saltos entre extremos.",
     "matices_lab_grados": {
       "red": 39.9,
@@ -241,7 +243,8 @@
     "matiz_tolerancia_grados": 75.0,
     "_nota_tolerancia": "Cu\u00e1nto puede apartarse el matiz medido del de referencia para aceptar la clasificaci\u00f3n. Con 45 grados, las clases no se solapan (la m\u00e1s cercana est\u00e1 a 33) y una mancha de un color que no es ninguno de los tres se descarta en vez de forzarse.",
     "area_minima_relativa": 0.05,
-    "area_maxima_relativa": 1.5,
+    "area_maxima_relativa": 1.8,
+    "_nota_area_5oct": "Subido de 1,5 a 1,8 el 5-oct-2026: la mancha de un cubo incluye la tapa y una o dos caras laterales, y con croma_minimo en 18 los cubos medidos quedaron en 1,38 caras (rojo) y 1,40 (azul), cerca del tope de 1,5. Los cubos hacia el borde de la imagen muestran más cara lateral y se pasaban.",
     "_nota_area": "Tama\u00f1o admisible de la mancha, como fracci\u00f3n del \u00e1rea que ocupar\u00eda la cara de un cubo. Se expresa relativo y no en p\u00edxeles porque los p\u00edxeles dependen de la resoluci\u00f3n y de la altura de la c\u00e1mara. El m\u00ednimo bajo (0,25) es a prop\u00f3sito: un cubo empujado por un rover pierde alrededor del 22 % de su \u00e1rea, y hay que seguir encontr\u00e1ndolo.",
     "recorte_robusto": 0.75,
     "_NOTA_RECORTE": "Fracci\u00f3n de los puntos del contorno que entran en el costo del ajuste, qued\u00e1ndose con los que mejor encajan. Es lo que vuelve el ajuste inmune a la OCLUSI\u00d3N: cuando un rover tapa parte del cubo, el borde de la mancha por ese lado NO es el borde del cubo sino el del chasis, y esos puntos tirar\u00edan del ajuste hacia un lugar equivocado. Descartando el cuarto peor, el ajuste se apoya solo en el contorno que de verdad es del cubo.",
@@ -339,7 +342,8 @@
       "_acerca_de": "Exposici\u00f3n, enfoque y balance de blancos SIEMPRE fijos, nunca en autom\u00e1tico (CLAUDE.md, secci\u00f3n 5). Un ajuste que se mueve solo cambia los colores a mitad de ronda y rompe la detecci\u00f3n. El caso m\u00e1s peligroso es el robot negro: con exposici\u00f3n autom\u00e1tica, la c\u00e1mara sube la ganancia para 'compensar' el negro y quema los marcadores blancos.",
       "exposicion": {
         "fijar": true,
-        "valor": 450,
+        "valor": 45,
+        "_nota_luz": "Cambia con la luz del lugar (V4L2: unidades de 100 microsegundos). Medido el 5-oct-2026 con la C270 en la cancha: de NOCHE 450 (45 ms); de DIA 40 (4 ms). Con 450 de dia la imagen queda 82 % quemada y no se detecta nada; con 40 de dia, brillo medio 131 y 0,7 % quemado. Ademas, cuanto MAS CORTA la exposicion, menos se borronean los marcadores de los rovers al moverse. Regla: el valor mas bajo que deje ver bien los cubos y los marcadores. A media manana del 5-oct la luz bajo (brillo 133 -> 107) y se subio de 40 a 50: brillo 126, 3,8 % quemado. Con 30 el verde se pierde (6 de 81 cuadros); con 60 y 70 el rojo empieza a fallar (73 y 62 de 81) y la imagen se quema 7-10 %.",
         "prueba_a": 60,
         "prueba_b": 250,
         "_nota_unidades": "OJO: las unidades dependen del backend. En DSHOW el valor suele ser log2 de segundos (-6 = 1/64 s); en V4L2 son unidades de 100 microsegundos. No hay un valor universal: hay que ajustarlo mirando la imagen en la c\u00e1mara y el sistema reales.",
@@ -354,7 +358,8 @@
       },
       "balance_blancos": {
         "fijar": true,
-        "valor": 4500,
+        "valor": 5600,
+        "_nota_5oct": "Subido de 4500 a 5600 el 5-oct-2026, con luz de dia. Con 4500 el tablero salia AZULADO (b* = -4,6) y su ruido de color tiene el mismo matiz que el cubo azul: se pegaba a su mancha o competia con ella, y el azul no se detectaba (0 de 61 cuadros; el rojo, 52 de 61). Con 5600 el tablero queda neutro (b* = -0,6) y los tres cubos salen en 61 de 61. Medido en vivo con v4l2-ctl. Si cambia la luz (lamparas calidas de noche), repetir la medida: lo que se busca es que el tablero blanco de b* cerca de 0. TARDE del 5-oct (16 h, luz mucho mas baja y mas calida): con 5600 el tablero salia amarillento (b* = +4,5) y el azul no se detectaba; con 4800 queda en b* = +0,9. Valores de referencia: MANANA exposicion 45 + balance 5600 + ganancia 0; TARDE exposicion 90 + balance 4800 + GANANCIA 150. OJO con la ganancia: este sistema no la fija (queda como la deje la camara al abrir, se vio 0 y 12), y es la que decide si el cubo AZUL se ve: es tan oscuro que con poca luz su croma cae a 21 y la mitad de sus pixeles queda bajo el umbral; con ganancia 150 sube a 38 y se detecta siempre, sin alargar la exposicion (que borronea los marcadores en movimiento). Se pone desde afuera con ./camara.sh (raiz del repo) DESPUES de arrancar la vision.",
         "prueba_a": 2800,
         "prueba_b": 6500,
         "_nota": "Temperatura de color en kelvin. La verificaci\u00f3n por efecto compara la relaci\u00f3n azul/rojo de la imagen entre los dos valores."

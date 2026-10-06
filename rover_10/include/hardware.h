@@ -4,6 +4,9 @@
 #include <Arduino.h>
 
 void hardwareInit();
+// Arranca el giroscopio. Va aparte de hardwareInit() para poder saltearlo si la placa
+// viene de colgarse en el arranque (ver setup()).
+void hardwareImuInit();
 
 // Potencia de cada lado en [-1.0, 1.0]. Positivo = adelante (ya corrige polaridad).
 void setMotors(float left, float right);
@@ -22,6 +25,7 @@ void setLedColor(uint8_t r, uint8_t g, uint8_t b);
 // inmediata: la cámara tarda ~0,4 s en mostrar lo mismo.
 bool imuReady();
 float gyroZDps();
+uint16_t gyroFailures();        // Lecturas fallidas desde que encendió (para el monitor)
 // Llamar con el robot QUIETO: acerca de a poco el cero del giroscopio a lo que mide ahora
 void gyroRezero();
 

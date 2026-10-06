@@ -27,6 +27,8 @@ enum State { ST_ELEGIR, ST_IR, ST_APUNTAR, ST_CAPTURAR, ST_REAPUNTAR, ST_TRANSPO
 
 static const float CUBE_AHEAD = AXLE_OFFSET + CONTACT_OFFSET;   // Eje -> centro del cubo en las pinzas
 static const uint32_t SELECT_PERIOD_MS = 300;                   // Elegir es caro: no en cada ciclo
+static const uint32_t SELECT_IDLE_PERIOD_MS = 1000;             // Sin nada que hacer: volver a mirar cada tanto, no sin parar
+static const int SELECT_MAX_SEARCHES = 2;                       // Búsquedas de captura por llamada: el resto sigue en la próxima
 static const float AIM_MAX_DEG = 12.0f;                         // Corrección de puntería admitida en un punto de preparación
 static const uint32_t GIVE_UP_MS = 45000;                       // Esperando sin poder hacer nada: se da por terminado
 
@@ -55,6 +57,11 @@ static const int MAX_PARKING_MOVES = 4; // Por ronda, para no entrar en un ir y 
 static Point goal;
 static uint32_t state_since_ms = 0;
 static uint32_t last_select_ms = 0;
+// Elegir tarea puede pedir muchas búsquedas (cada una bloquea ~1 s en la placa). Se hacen
+// de a pocas por llamada: scan_from dice por qué candidato sigue la pasada en curso.
+static int scan_from = 0;
+static bool scan_partial = false;       // La última llamada cortó la pasada por la mitad
+static bool route_task = false;         // La tarea en curso salió de una ruta cargada por la PC
 static int attempts[NUM_COLORS];
 static StrategyStats stats;
 static const char* why[NUM_COLORS] = { "-", "-", "-" };
@@ -85,6 +92,8 @@ static uint32_t yield_since_ms = 0;
 static uint32_t yield_ignore_until_ms = 0;
 
 static bool drop_aimed = false;      // ENTREGAR: ya apuntó al destino con el cubo
+static bool drop_reaimed = false;    // ENTREGAR: ya volvió a apuntar una vez por desvío de costado
+static bool retouched[NUM_COLORS];   // Ya se le hizo el retoque a ese cubo (uno por cubo)
 // ENTREGAR, al final: se detiene, mira con la cámara dónde quedó el cubo de verdad y,
 // si quedó corto, da empujones cortos. (La pose predicha puede adelantarse a la real.)
 static uint32_t confirm_since_ms = 0;   // 0 = todavía no está confirmando
@@ -150,6 +159,7 @@ static bool seatCube(const Pose &pose, const TelemetrySnapshot &snap, CubeColor 
 // para que no crea que me apagué, y al monitor.
 static void (*keep_alive_hook)() = nullptr;
 void strategySetKeepAlive(void (*fn)()) { keep_alive_hook = fn; }
+bool strategySeating() { return seat_needed; }
 static void keepAlive() {
     coordKeepAlive();
     if (keep_alive_hook) keep_alive_hook();
@@ -158,6 +168,7 @@ static void keepAlive() {
 static void enter(State s) {
     state = s;
     drop_aimed = false;
+    drop_reaimed = false;
     confirm_since_ms = 0;
     state_since_ms = millis();
     aimed_since_ms = 0;
@@ -257,9 +268,38 @@ static void withoutPeerCubes(const TelemetrySnapshot &snap, TelemetrySnapshot &o
     }
 }
 
+// ¿Sirve todavía la captura que la PC dejó cargada para el cubo 'c'? Vale si el cubo
+// sigue donde estaba, esa captura no falló ya, y el tramo recto final hasta el cubo
+// sigue libre. Si no sirve se descarta, y el rover busca la suya como siempre.
+static bool loadedCapture(const TelemetrySnapshot &snap, CubeColor c, Approach &out) {
+#if USE_PC_ROUTES
+    const TaskRoute *tr = planRoute(c);
+    if (!tr) return false;
+    Point cube = cubePos(snap, c);
+    Approach app = { tr->stage, tr->dir, tr->cube_at };
+    bool ok = dist(cube, tr->cube_at) <= 1.0f && !isBanned(c, app);
+    // Sin contar al compañero: está de paso, y de él se ocupan la navegación y la
+    // captura cuando llegue el momento. Lo que invalida la ruta es un cubo o la línea.
+    static TelemetrySnapshot alone;
+    alone = snap;
+    alone.peer.detected = false;
+    float aim = headingTo(app.stage, cube);
+    for (float d = dist(app.stage, cube); ok && d >= CUBE_AHEAD; d -= 1.0f) {
+        ok = poseClear(advance(cube, aim, -d), aim, alone, c);
+    }
+    if (!ok) { planDropRoute(c); return false; }
+    out = app;
+    return true;
+#else
+    return false;
+#endif
+}
+
 // Mejor forma de tomar el cubo 'c' desde 'pose' y llevarlo hasta 'where'; false si no
 // hay. Las capturas se prueban de la más barata a la más cara, y se acepta la primera
 // desde la que haya ruta hasta 'where' con el cubo en las pinzas.
+static bool directDelivery(const Pose &pose, const TelemetrySnapshot &snap, CubeColor c, Point drop, float gap);
+
 static bool bestCapture(const TelemetrySnapshot &snap, const Pose &pose, CubeColor c, Point where, Approach &out) {
     static const int MAX_CANDIDATES = 40, MAX_TRIES = 5;
     static Approach list[MAX_CANDIDATES];
@@ -291,7 +331,14 @@ static bool bestCapture(const TelemetrySnapshot &snap, const Pose &pose, CubeCol
     // delante y sin lugar para maniobrar junto a la línea.)
     float bearing = wrapDeg(headingTo(pose.p, app.target) - pose.theta);
     float reach = dist(pose.p, app.target);
-    if (n < MAX_CANDIDATES && fabsf(bearing) <= AIM_MAX_DEG && reach >= FP_PRONG_TIP + 2.5f) {
+    // Vale de lejos (hay recorrido para afinar la puntería antes de que lleguen las
+    // puntas) o de muy cerca si el cubo ya está centrado entre las pinzas: pasa cuando se
+    // lo soltó tras un intento fallido y el rover quedó pegado detrás, sin lugar para
+    // irse a un punto de preparación.
+    float lateral = fabsf(reach * sinf(bearing * (float)M_PI / 180.0f));
+    bool far_enough = reach >= FP_PRONG_TIP + 2.5f;
+    bool already_in = reach >= CUBE_AHEAD - 0.5f && reach < FP_PRONG_TIP + 2.5f && lateral < 0.9f;
+    if (n < MAX_CANDIDATES && fabsf(bearing) <= AIM_MAX_DEG && (far_enough || already_in)) {
         bool clear = true;
         float aim = headingTo(pose.p, app.target);
         for (float d = reach; d >= CUBE_AHEAD && clear; d -= 1.0f) {
@@ -328,7 +375,11 @@ static bool bestCapture(const TelemetrySnapshot &snap, const Pose &pose, CubeCol
         keepAlive();
         navPrepare(later, captured, c);
         Approach unused;
-        if (bestDrop(later, c, where, unused)) {
+        // Hay cómo llevarlo si existe una entrada por un punto de preparación, O si
+        // desde donde queda tomado se puede girar y empujar derecho. Lo segundo es lo
+        // único posible cuando el cubo está cerca de su zona (no hay lugar para el punto
+        // de preparación); sin contarlo, ese cubo quedaba sin que nadie lo tomara.
+        if (bestDrop(later, c, where, unused) || directDelivery(captured, later, c, where, CUBE_AHEAD)) {
             out = list[i];
             return true;
         }
@@ -466,6 +517,21 @@ static CubeColor selectTask(const TelemetrySnapshot &snap, const Pose &pose) {
     }
     const PeerState &peer = coordPeer();
 
+    // ¿Probar este candidato ahora? No si ya se probó en esta pasada, ni si esta llamada
+    // ya hizo su cupo de búsquedas (entonces la pasada sigue desde acá la próxima vez).
+    int searches = 0, k = 0;
+    scan_partial = false;
+    auto mayTry = [&]() -> bool {
+        if (k++ < scan_from) return false;
+        if (searches >= SELECT_MAX_SEARCHES) {
+            if (!scan_partial) { scan_partial = true; scan_from = k - 1; }
+            return false;
+        }
+        searches++;
+        return true;
+    };
+    auto found = [&]() { scan_from = 0; scan_partial = false; };
+
     all_mine_done = true;
     for (int i = 0; i < plan.n_mine; i++) {
         CubeColor c = plan.mine[i];
@@ -480,10 +546,22 @@ static CubeColor selectTask(const TelemetrySnapshot &snap, const Pose &pose) {
         CubeColor c = plan.mine[i];
         if (!pendingCube(snap, c) || attempts[c] >= MAX_ATTEMPTS) continue;
         if (coordPeerClaims(c)) { why[c] = "lo atiende el compañero"; continue; }
+        // Ya resuelto por la PC antes de arrancar: no hace falta buscar
+        if (loadedCapture(snap, c, capture)) {
+            drop_target = snap.depots[c];
+            parking = false;
+            route_task = true;
+            why[c] = "en curso (ruta cargada)";
+            found();
+            return c;
+        }
+        if (!mayTry()) continue;
         if (bestCapture(snap, pose, c, snap.depots[c], capture)) {
             drop_target = snap.depots[c];
             parking = false;
+            route_task = false;
             why[c] = "en curso";
+            found();
             return c;
         }
     }
@@ -494,16 +572,20 @@ static CubeColor selectTask(const TelemetrySnapshot &snap, const Pose &pose) {
         for (int i = plan.n_peer - 1; i >= 0; i--) {
             CubeColor c = plan.peer[i];
             if (!pendingCube(snap, c) || attempts[c] >= MAX_ATTEMPTS || coordPeerClaims(c)) continue;
+            if (!mayTry()) continue;
             if (bestCapture(snap, pose, c, snap.depots[c], capture)) {
                 drop_target = snap.depots[c];
                 parking = false;
+                route_task = false;
                 stats.helps++;
+                found();
                 return c;
             }
         }
     }
 
-    if (!mayPark(snap, plan)) return COLOR_UNKNOWN;
+    if (scan_partial) return COLOR_UNKNOWN;             // Sigue en la próxima llamada
+    if (!mayPark(snap, plan)) { scan_from = 0; return COLOR_UNKNOWN; }
     // Lugares candidatos: una grilla gruesa por el interior de la cancha
     for (int i = 0; i < plan.n_mine; i++) {
         CubeColor c = plan.mine[i];
@@ -512,17 +594,21 @@ static CubeColor selectTask(const TelemetrySnapshot &snap, const Pose &pose) {
             for (float row = 0.25f; row <= 0.76f; row += 0.25f) {
                 Point p = { snap.grid_cols * col, snap.grid_rows * row };
                 if (!goodParking(snap, c, p)) continue;
+                if (!mayTry()) continue;
                 if (bestCapture(snap, pose, c, p, capture)) {
                     drop_target = p;
                     parking = true;
+                    route_task = false;
                     parking_moves++;
                     stats.parks++;
                     why[c] = "apartando";
+                    found();
                     return c;
                 }
             }
         }
     }
+    if (!scan_partial) scan_from = 0;                   // Pasada completa sin encontrar nada
     return COLOR_UNKNOWN;
 }
 
@@ -612,8 +698,11 @@ static bool mustYield(const Pose &pose, Point wp, const TelemetrySnapshot &snap,
     if (millis() < yield_ignore_until_ms) return false;
 
     Point pm = peerMarker(snap);
+    // En mi camino = cerca, hacia donde voy Y cerca del tramo que me queda. Sin lo
+    // último se cedía ante un compañero a 15 celdas por un tramo de 2 que apuntaba hacia él.
     bool in_my_way = dist(pose.p, pm) < YIELD_DIST &&
-                     fabsf(wrapDeg(headingTo(pose.p, pm) - headingTo(pose.p, wp))) < 60.0f;
+                     fabsf(wrapDeg(headingTo(pose.p, pm) - headingTo(pose.p, wp))) < 60.0f &&
+                     pointToSegment(pm, pose.p, wp) < YIELD_LEG_DIST;
     if (peer.heard) {
         // Con sus mensajes: se comparan los dos tramos, no solo las posiciones
         float gap = min(min(pointToSegment(pose.p, pm, peer.waypoint), pointToSegment(wp, pm, peer.waypoint)),
@@ -668,10 +757,55 @@ static void release(const Pose &pose, bool completed) {
     enter(ST_SOLTAR);
 }
 
+bool strategyPreplan(const TelemetrySnapshot &snap, const Pose &pose, CubeColor c, Preplan &out) {
+    out = Preplan();
+    if (c < 0 || c >= NUM_COLORS || !snap.cubes[c].detected) return false;
+    geometrySetSelf(pose.p, pose.theta);
+    geometrySetPeerStill(true);             // Antes de arrancar el compañero está quieto
+    Point depot = snap.depots[c];
+    Approach cap;
+    if (!bestCapture(snap, pose, c, depot, cap)) return false;
+    out.cube_at = cap.target;
+    out.from = pose.p;
+    out.stage = cap.stage;
+    out.dir = cap.dir;
+    bool complete = true;
+    if (dist(pose.p, cap.stage) >= 0.9f) {
+        if (!navPlanRoute(pose, cap.stage, cap.dir, snap, COLOR_UNKNOWN)) return false;
+        out.n_go = navLegs(out.go, NAV_MAX_LEGS, &complete);
+        if (!complete) out.n_go = 0;        // Demasiado larga para cargarla: el rover la calcula a bordo
+    }
+
+    // Con el cubo tomado: derecho si se puede (es lo primero que mira el rover), y si
+    // no, entrando por un punto de preparación
+    Pose captured;
+    captured.theta = headingTo(cap.stage, cap.target);
+    captured.p = advance(cap.target, captured.theta, -CUBE_AHEAD);
+    float heading;
+    if (directDelivery(captured, snap, c, depot, CUBE_AHEAD)) {
+        heading = headingTo(captured.p, depot);
+    } else {
+        navPrepare(snap, captured, c);
+        Approach drop;
+        if (!bestDrop(snap, c, depot, drop)) return false;
+        out.has_drop = true;
+        out.drop_stage = drop.stage;
+        out.drop_dir = drop.dir;
+        if (navPlanRoute(captured, drop.stage, drop.dir, snap, c)) {
+            out.n_carry = navLegs(out.carry, NAV_MAX_LEGS, &complete);
+            if (!complete) out.n_carry = 0;
+        }
+        heading = headingTo(drop.stage, depot);
+    }
+    out.end.p = advance(depot, heading, -(CUBE_AHEAD + RETREAT_DIST));
+    out.end.theta = heading;
+    return true;
+}
+
 // Apunta hacia 'to' y devuelve true cuando lleva así, quieto, el tiempo suficiente
 // para que la cámara lo confirme (la pose predicha sola no alcanza).
-static bool aimAt(const Pose &pose, Point to, const TelemetrySnapshot &snap, CubeColor carried) {
-    if (!motionTurnTo(pose, headingTo(pose.p, to), 4.0f, snap, carried)) aimed_since_ms = 0;
+static bool aimAt(const Pose &pose, Point to, const TelemetrySnapshot &snap, CubeColor carried, float tol_deg = 4.0f) {
+    if (!motionTurnTo(pose, headingTo(pose.p, to), tol_deg, snap, carried)) aimed_since_ms = 0;
     else if (aimed_since_ms == 0) aimed_since_ms = millis();
     else if (millis() - aimed_since_ms > motionCal().latency_ms + 100) return true;
     return false;
@@ -705,7 +839,7 @@ void strategyReset() {
     coordReset();
     target = COLOR_UNKNOWN;
     state_name = "ESPERA";
-    for (int i = 0; i < NUM_COLORS; i++) { attempts[i] = 0; why[i] = "-"; }
+    for (int i = 0; i < NUM_COLORS; i++) { attempts[i] = 0; why[i] = "-"; retouched[i] = false; }
     stats = StrategyStats();
     for (Banned &b : banned) b = Banned{ COLOR_UNKNOWN, Point(), 0, 0 };
     progress_since_ms = 0;
@@ -717,6 +851,9 @@ void strategyReset() {
     cleared_until_ms = 0;
     all_mine_done = false;
     have_delivery = false;
+    scan_from = 0;
+    scan_partial = false;
+    route_task = false;
     enter(ST_ELEGIR);
 }
 
@@ -762,8 +899,10 @@ void strategyStep(const TelemetrySnapshot &seen) {
         // a la vez. Sale primero el de menor ID; yo me quedo quieto, y él me rodea
         // sabiendo que no me muevo. Espero hasta que se aleje, o un rato como máximo.
         static uint32_t depart_wait_since_ms = 0;
+        // Con rutas de la PC que ya comprobó que no se cruzan, salen los dos a la vez.
         bool crowded = snap.peer.detected && peer.heard && peer.activity != ACT_DONE &&
-                       ROVER_ID > ROVER_PEER_ID && dist(pose.p, peerCenter(snap)) < DEPART_GAP;
+                       ROVER_ID > ROVER_PEER_ID && dist(pose.p, peerCenter(snap)) < DEPART_GAP &&
+                       !(USE_PC_ROUTES && planDepartTogether() && planRouteCount() > 0);
         if (!crowded) depart_wait_since_ms = 0;
         else {
             if (depart_wait_since_ms == 0) depart_wait_since_ms = millis();
@@ -773,7 +912,10 @@ void strategyStep(const TelemetrySnapshot &seen) {
                 return;
             }
         }
-        if (millis() - last_select_ms < SELECT_PERIOD_MS && last_select_ms != 0) return;
+        // Sin nada que hacer se vuelve a mirar cada tanto (no sin parar: cada búsqueda
+        // deja al rover sordo un rato). A media pasada, se sigue enseguida.
+        uint32_t period = state == ST_FIN && !scan_partial ? SELECT_IDLE_PERIOD_MS : SELECT_PERIOD_MS;
+        if (millis() - last_select_ms < period && last_select_ms != 0) return;
         last_select_ms = millis();
         target = selectTask(snap, pose);
         if (target == COLOR_UNKNOWN) {
@@ -794,6 +936,11 @@ void strategyStep(const TelemetrySnapshot &seen) {
         idle_since_ms = 0;
         have_delivery = false;
         navReset();
+        // Ruta de ida ya calculada por la PC: se usa si salgo de donde ella supuso
+        if (route_task) {
+            const TaskRoute *tr = planRoute(target);
+            if (tr && tr->n_go > 0 && dist(pose.p, tr->from) < 4.0f) navSetRoute(tr->go, tr->n_go, capture.stage, capture.dir);
+        }
         enter(ST_IR);
     }
 
@@ -849,8 +996,11 @@ void strategyStep(const TelemetrySnapshot &seen) {
             motionStop();
             break;
         }
-        NavStatus nav = navGo(pose, capture.stage, capture.dir, snap, COLOR_UNKNOWN);
-        goal = navWaypoint();
+        // Ya sobre el punto de preparación (captura directa desde donde está): no hay
+        // ruta que calcular ni que seguir
+        bool at_stage = !navHasRoute() && dist(pose.p, capture.stage) < 0.9f;
+        NavStatus nav = at_stage ? NAV_ARRIVED : navGo(pose, capture.stage, capture.dir, snap, COLOR_UNKNOWN);
+        goal = at_stage ? capture.stage : navWaypoint();
         if (nav == NAV_NO_PATH) {
             if (waitForPeer(pose, snap)) { state_name = "ESPERAR"; navReset(); break; }
             stats.nav_fail++;
@@ -882,7 +1032,15 @@ void strategyStep(const TelemetrySnapshot &seen) {
     case ST_CAPTURAR: {
         state_name = "CAPTURAR";
         goal = cube;
-        if (millis() - state_since_ms > 10000) {
+        // Plazo según lo lejos que estaba el cubo al empezar: una captura directa desde
+        // la salida son 25 celdas, y con un plazo fijo vencía sin que nada fallara.
+        static uint32_t capture_limit_ms = 10000, capture_limit_for = 0;
+        if (capture_limit_for != state_since_ms) {
+            capture_limit_for = state_since_ms;
+            // 10 s como siempre; más solo si el cubo está tan lejos que no alcanzan
+            capture_limit_ms = max((uint32_t)10000, (uint32_t)(4000.0f + 350.0f * dist(pose.p, cube)));
+        }
+        if (millis() - state_since_ms > capture_limit_ms) {
             stats.capture_timeout++;
             ban(target, capture);
             release(pose, false);
@@ -918,9 +1076,18 @@ void strategyStep(const TelemetrySnapshot &seen) {
             break;
         }
 
-        // Recto y lento hacia el centro del cubo
+        // Recto hacia el centro del cubo: de lejos a buen paso, y lento desde antes de que
+        // lleguen las puntas (ahí es donde se comprueba que viene centrado)
         float diff = wrapDeg(headingTo(pose.p, cube) - pose.theta);
-        float power = POWER_MIN_MOVE + 0.05f;
+        float far = ahead_now - (FP_PRONG_TIP + CAPTURE_SLOW_DIST);
+        // Con el compañero cerca del tramo que FALTA y por delante, lento: a paso rápido
+        // no se frena a tiempo. (Lado a lado en la salida no cuenta: no está delante.)
+        if (snap.peer.detected) {
+            Point pc = peerCenter(snap);
+            bool ahead = fabsf(wrapDeg(headingTo(pose.p, pc) - pose.theta)) < 60.0f;
+            if (ahead && pointToSegment(pc, pose.p, cube) < 10.0f) far = 0.0f;
+        }
+        float power = constrain(POWER_MIN_MOVE + 0.05f + far * 0.05f, POWER_MIN_MOVE + 0.05f, CAPTURE_FAST_POWER);
         float steer = constrain(diff * 0.012f, -0.12f, 0.12f);
         motionDrive(power - steer, power + steer);
         break;
@@ -951,7 +1118,16 @@ void strategyStep(const TelemetrySnapshot &seen) {
             inside_seq = snap.seq;
             inside_frames = (!parking && !holding && cube_fresh && delivered(snap, target)) ? inside_frames + 1 : 0;
         }
-        if (inside_frames >= 4) { inside_frames = 0; release(pose, true); break; }
+        if (inside_frames >= 4) {
+            inside_frames = 0;
+            if (cubeMargin(cube, target, snap) >= DROP_SAFE_MARGIN) { release(pose, true); break; }
+            // Está dentro pero justo en el borde: no se suelta ahí. Se deja de maniobrar
+            // y se lo empuja recto al centro.
+            motionStop();
+            navReset();
+            enter(ST_ENTREGAR);
+            break;
+        }
 
         if (!seatCube(pose, snap, target, cube_fresh, ahead_seen)) break;
 
@@ -972,6 +1148,29 @@ void strategyStep(const TelemetrySnapshot &seen) {
         if (!have_delivery) {
             motionStop();
             goal = drop_target;
+            // Entrega ya calculada por la PC: vale si tomé el cubo como ella supuso. Se
+            // usa una sola vez: en un segundo intento el rover ya no sale de ahí.
+            const TaskRoute *tr = route_task && !parking ? planRoute(target) : nullptr;
+            route_task = false;
+            if (tr && tr->has_drop) {
+                float th = headingTo(tr->stage, tr->cube_at);
+                Point expected = advance(tr->cube_at, th, -CUBE_AHEAD);
+                bool as_planned = dist(pose.p, expected) < 2.0f && fabsf(wrapDeg(pose.theta - th)) < 20.0f;
+                Approach loaded = { tr->drop_stage, tr->drop_dir, drop_target };
+                int n = tr->n_carry;
+                static NavLeg carry[NAV_MAX_LEGS];
+                for (int i = 0; i < n; i++) carry[i] = tr->carry[i];
+                planDropRoute(target);
+                if (as_planned) {
+                    delivery = loaded;
+                    have_delivery = true;
+                    holding = false;
+                    navSetRoute(carry, n, delivery.stage, delivery.dir);
+                    break;
+                }
+            } else if (tr) {
+                planDropRoute(target);
+            }
             navPrepare(snap, pose, target);
             have_delivery = bestDrop(snap, target, drop_target, delivery);
             holding = false;
@@ -1013,7 +1212,13 @@ void strategyStep(const TelemetrySnapshot &seen) {
         // Primero apunta al destino (girando con el cubo), después avanza recto
         if (!drop_aimed) {
             if (!seatCube(pose, snap, target, cube_fresh, ahead_seen)) break;
-            drop_aimed = aimAt(pose, drop, snap, target);
+            // Con el cubo, cada grado de giro cuesta: no hace falta apuntar al centro con
+            // 4° exactos si falta recorrido, porque el timón corrige en el camino. Se acepta el
+            // desvío que deja al cubo a DROP_AIM_OFFSET celdas del centro (de lejos son
+            // pocos grados, de cerca más), entre 4° y 6°.
+            float run = max(dist(pose.p, drop) - gap, 1.0f);
+            float tol = constrain(atan2f(DROP_AIM_OFFSET, run) * 180.0f / (float)M_PI, 4.0f, 6.0f);
+            drop_aimed = aimAt(pose, drop, snap, target, tol);
             // No logró apuntar: empujar igual lleva el cubo a cualquier lado. Se suelta
             // acá y se vuelve a tomar desde un ángulo mejor.
             if (!drop_aimed && millis() - state_since_ms > AIM_WITH_CUBE_MS) {
@@ -1034,13 +1239,25 @@ void strategyStep(const TelemetrySnapshot &seen) {
             }
             motionStop();
             if (now - confirm_since_ms < (uint32_t)motionCal().latency_ms + 250) break;
-            // Quieto y con la cámara al día: cuánto le falta al cubo, medido sobre el rumbo
+            // Quieto y con la cámara al día: cuánto le falta al cubo para el centro,
+            // medido sobre el rumbo (short_by) y de costado (side)
             float off = wrapDeg(headingTo(cube, drop) - pose.theta) * (float)M_PI / 180.0f;
             float short_by = dist(cube, drop) * cosf(off);
-            if (!cube_fresh || short_by < 0.7f || nudges >= 5) { release(pose, true); break; }
+            float side = fabsf(dist(cube, drop) * sinf(off));
+            if (!cube_fresh || short_by < DROP_DEPTH_TOL || nudges >= DROP_MAX_NUDGES) { release(pose, true); break; }
+            // Desviado de costado y todavía lejos: empujar recto no lo centra. Se vuelve
+            // a apuntar al centro (una sola vez) y se sigue desde ahí.
+            if (side > DROP_SIDE_TOL && short_by > 2.0f && !drop_reaimed) {
+                drop_reaimed = true;
+                drop_aimed = false;
+                confirm_since_ms = 0;
+                state_since_ms = millis();      // El plazo para apuntar empieza de nuevo
+                break;
+            }
             nudges++;
+            // A esta potencia el robot avanza bastante menos de lo que dice la calibración
             float speed = motionCal().speed_gain * (POWER_MIN_MOVE + 0.05f);
-            nudge_until_ms = now + (uint32_t)constrain(short_by / speed * 1000.0f, 120.0f, 700.0f);
+            nudge_until_ms = now + (uint32_t)constrain(short_by / speed * 1000.0f * 2.5f, 200.0f, 900.0f);
             break;
         }
 
@@ -1105,6 +1322,21 @@ void strategyStep(const TelemetrySnapshot &seen) {
             verify_ok = delivered(snap, target) ? verify_ok + 1 : 0;
         }
         if (verify_ok >= 5) {
+            // Quedó dentro, pero pegado al límite: un roce lo saca y la regla exige que
+            // siga dentro hasta el final. Un retoque (uno solo por cubo): el rover
+            // retrocedió recto, así que sigue mirándolo; lo vuelve a tomar y lo empuja
+            // al centro.
+            if (DROP_RETOUCH && !retouched[target] && cubeMargin(cube, target, snap) < DROP_MIN_MARGIN &&
+                fabsf(wrapDeg(headingTo(pose.p, cube) - pose.theta)) < AIM_MAX_DEG) {
+                retouched[target] = true;
+                stats.retouches++;
+                capture.target = cube;
+                capture.stage = pose.p;
+                drop_target = depot;
+                parking = false;
+                enter(ST_CAPTURAR);
+                break;
+            }
             stats.deliveries++;
             enter(ST_ELEGIR);                           // Entregado
         } else if (millis() - state_since_ms > 2500) {

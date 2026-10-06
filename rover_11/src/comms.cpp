@@ -22,7 +22,7 @@ bool commsPoll(String &cmd) {
     // a este rover: un comando viejo nunca se ejecuta después de uno nuevo.
     bool got = false;
     while (udp.parsePacket() > 0) {
-        char buf[96];
+        static char buf[1024];          // Un plan con rutas ocupa varios cientos de bytes
         int len = udp.read(buf, sizeof(buf) - 1);
         if (len <= 0) continue;
         buf[len] = '\0';
