@@ -17,7 +17,7 @@ src = open('rover_10/include/config.h').read()
 old = open('rover_11/include/config.h').read()
 keep = lambda name: re.search(r'^#define %s .*$' % name, old, re.M).group(0)
 out = src
-for name in ['ROVER_ID', 'ROVER_PEER_ID', 'INVERT_MOTOR_L', 'MOTOR_SCALE', 'LOOP_LATENCY_MS', 'SPEED_GAIN', 'TURN_GAIN']:
+for name in ['ROVER_ID', 'ROVER_PEER_ID', 'INVERT_MOTOR_L', 'MOTOR_SCALE', 'LOOP_LATENCY_MS', 'SPEED_GAIN', 'TURN_GAIN', 'POWER_PIVOT_CARRY']:
     out = re.sub(r'^#define %s .*$' % name, lambda m, n=name: keep(n), out, flags=re.M)
 out = re.sub(r'^// 4\. CALIBRACIÓN DE ESTE ROBOT.*$',
              lambda m: re.search(r'^// 4\. CALIBRACIÓN DE ESTE ROBOT.*$', old, re.M).group(0), out, flags=re.M)
